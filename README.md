@@ -26,6 +26,15 @@ Check out the live application: **[https://invoiceflowbilling.web.app](https://i
 *   **Sheet Backups**: Auto-sync transactions to a Google Sheet for easy accounting.
 *   **Role-Based Access**: Separate interfaces for **Admins** and **Shop Staff**.
 
+### 📊 Automated Backups (Google Sheets)
+
+InvoiceFlow ensures your data is never lost by syncing essentially every transaction to **Google Sheets** in real-time. This serves as a powerful secondary database that is easy to access and analyze.
+
+*   **Real-time Sync**: Every time a bill is generated or stock is purchased, the data is pushed to a connected Google Sheet instantly.
+*   **Dual Storage**: Data lives in Firestore (for the app) AND Google Sheets (for you).
+*   **Easy Accounting**: Use the generated Google Sheet to run your own custom formulas, pivot tables, or share with your accountant without giving them app access.
+*   **Zero Maintenance**: Once configured, the sync happens automatically in the background.
+
 ---
 
 ## ⌨️ Keyboard Shortcuts
