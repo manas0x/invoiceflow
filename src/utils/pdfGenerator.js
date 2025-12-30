@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf'
 import autoTable from 'jspdf-autotable'
+import { appConfig } from '../config/appConfig'
 
 export const generateInvoicePDF = (invoice) => {
     const doc = new jsPDF()
@@ -8,14 +9,14 @@ export const generateInvoicePDF = (invoice) => {
     doc.setFontSize(22)
     doc.setTextColor(45, 106, 79)
     doc.setFont(undefined, 'bold')
-    doc.text('INVOICEFLOW', 105, 20, { align: 'center' })
+    doc.text(appConfig.appName.toUpperCase(), 105, 20, { align: 'center' })
 
     doc.setFontSize(10)
     doc.setTextColor(80, 80, 80)
     doc.setFont(undefined, 'normal')
-    doc.text('Fertilizers, Pesticides & Seeds Retailer', 105, 28, { align: 'center' })
-    doc.text('Subhasnagar Road, Bakhpur, Nainital, Uttarakhand 263148', 105, 33, { align: 'center' })
-    doc.text('Phone: +91 75359 10738', 105, 38, { align: 'center' })
+    doc.text(appConfig.tagline, 105, 28, { align: 'center' })
+    doc.text(appConfig.address, 105, 33, { align: 'center' })
+    doc.text(`Phone: ${appConfig.contact}`, 105, 38, { align: 'center' })
 
     doc.setDrawColor(45, 106, 79)
     doc.setLineWidth(0.5)
@@ -153,9 +154,9 @@ export const generatePurchasePDF = (purchase) => {
     doc.setFontSize(10)
     doc.setTextColor(80, 80, 80)
     doc.setFont(undefined, 'normal')
-    doc.text('Fertilizers, Pesticides & Seeds Retailer', 105, 28, { align: 'center' })
-    doc.text('Subhasnagar Road, Bakhpur, Nainital, Uttarakhand 263148', 105, 33, { align: 'center' })
-    doc.text('Phone: +91 75359 10738', 105, 38, { align: 'center' })
+    doc.text(appConfig.tagline, 105, 28, { align: 'center' })
+    doc.text(appConfig.address, 105, 33, { align: 'center' })
+    doc.text(`Phone: ${appConfig.contact}`, 105, 38, { align: 'center' })
 
     doc.setDrawColor(45, 106, 79)
     doc.setLineWidth(0.5)

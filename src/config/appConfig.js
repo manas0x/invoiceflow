@@ -1,8 +1,9 @@
 export const appConfig = {
     appName: "InvoiceFlow",
+    tagline: "A Complete Business Management Solution",
     version: "1.0.0",
-    address: "Main Market, Your City",
-    contact: "",
+    address: "Ground Floor, City Centre Mall, New Delhi - 110001",
+    contact: "+91 98765 43210",
     currency: "₹",
     github: {
         repoUrl: "",
