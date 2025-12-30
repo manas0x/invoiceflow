@@ -201,7 +201,7 @@ const Customers = () => {
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                                 <div className="form-group">
                                     <label>Full Name</label>
-                                    <input required value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} type="text" placeholder="Farmer Name" />
+                                    <input required value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} type="text" placeholder="Customer Name" />
                                 </div>
                                 <div className="form-group">
                                     <label>Phone Number</label>

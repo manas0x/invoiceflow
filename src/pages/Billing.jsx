@@ -279,10 +279,10 @@ const Billing = ({ initialHistory = false, isStaff = false }) => {
                         {/* Customer Details Section */}
                         <div className="card p-5 shadow-sm">
                             <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
-                                <User size={20} className="text-primary" /> Farmer Details
+                                <User size={20} className="text-primary" /> Customer Details
                             </h3>
                             <div className="relative">
-                                <label className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider mb-1 block">Farmer Name / Phone</label>
+                                <label className="text-[10px] font-extrabold text-gray-400 uppercase tracking-wider mb-1 block">Customer Name / Phone</label>
                                 <div className="relative group">
                                     <input
                                         autoFocus
@@ -290,7 +290,7 @@ const Billing = ({ initialHistory = false, isStaff = false }) => {
                                         value={invoice.customerName}
                                         onChange={e => handleCustomerSearch(e.target.value)}
                                         onKeyDown={handleCustomerKeyDown}
-                                        type="text" placeholder="Search or enter farmer name..."
+                                        type="text" placeholder="Search or enter Customer name..."
                                         autoComplete="off"
                                     />
                                     <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
