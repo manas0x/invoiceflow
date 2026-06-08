@@ -1,0 +1,26 @@
+# Smart POS & Storefront Platform Goals
+
+1. **Unified Application Architecture**
+   - The entire software (Admin POS, KDS, and Public Storefront) must run as a single cohesive application on a single port.
+   - Separation of concerns should be handled via routing (`/shop`), not by creating entirely separate React projects.
+
+2. **Strict Contextual UI (Business Modes)**
+   - The interface must adapt intelligently based on the business type selected during installation.
+   - If "Restaurant" is selected, the sidebar must only show restaurant-relevant features (Live Orders, Table Management, KDS, Menu). Irrelevant generic modules like "Suppliers", "Purchases", or "Returns" must be hidden to maintain a professional, focused user experience.
+   - If "Retail" is selected, the system should operate as a standard inventory and billing system.
+
+3. **Theme and Brand Consistency**
+   - The UI theme chosen in the Installation Wizard (e.g., Black & White, Dark Mode) MUST apply globally across the entire software immediately.
+   - There should be no discrepancies between the installation styling and the main POS styling.
+
+4. **Public vs. Authenticated Access**
+   - Admin features (Billing, Inventory, Dashboard) require strict Role-Based Authentication.
+   - The Self-Ordering Storefront (`/shop`) must be publicly accessible *without* a login, allowing customers to easily scan a QR code and order.
+   - However, the storefront MUST NOT be accessible if the system hasn't completed the initial installation setup.
+
+5. **Modular Feature Toggling**
+   - Features like QR Self-Ordering and Zomato/Swiggy integration are modules.
+   - If an admin disables QR Self-Ordering during setup, the `/shop` route must display a professional "Disabled" error, preventing unauthorized usage.
+
+6. **Future Roadmap: Storefront Customization**
+   - The Self-Ordering menu will eventually require dedicated admin controls for custom product images, storefront-specific pricing, and customer-facing descriptions, independent of raw inventory metrics.
