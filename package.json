@@ -14,7 +14,7 @@
     "@capacitor/android": "^8.1.0",
     "@capacitor/core": "^8.1.0",
     "date-fns": "^4.1.0",
-    "firebase": "^12.7.0",
+    "firebase": "^12.14.0",
     "framer-motion": "^12.23.26",
     "jspdf": "^3.0.4",
     "jspdf-autotable": "^5.0.2",

@@ -221,15 +221,14 @@ const ShopPage = () => {
                 })),
                 total: cartTotal,
                 status: 'pending',
-                source: tableId ? 'table_qr' : 'self_kiosk',
-                tableId: tableId || 'Kiosk',
+                source: (currentTableId || tableId) ? 'table_qr' : 'self_kiosk',
+                tableId: currentTableId || tableId || 'Kiosk',
                 cookingInstructions,
                 hasPrescription: !!prescriptionFile,
                 customerName: customerName || 'Guest',
                 customerPhone: customerPhone || '',
-                timestamp: Date.now(),
-                tableId: currentTableId || null // Use currentTableId from state
-                };
+                timestamp: Date.now()
+            };
 
             const docRef = await addDoc(collection(db, 'shop_orders'), orderData);
             setLastOrderId(docRef.id);
