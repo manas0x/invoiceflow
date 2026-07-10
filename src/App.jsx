@@ -4,7 +4,6 @@ import { DiscountPlugin } from './plugins/discount.plugin'
 import { PaymentPlugin } from './plugins/payment.plugin'
 import { InventoryPlugin } from './plugins/inventory.plugin'
 import { GoogleDrivePlugin } from './plugins/google_drive.plugin'
-import { LoyaltyPlugin } from './plugins/loyalty.plugin'
 import {
   LayoutDashboard,
   Receipt,
@@ -14,7 +13,6 @@ import {
   BarChart3,
   Plus,
   Menu,
-  ChefHat,
   X,
   LogOut,
   User,
@@ -26,13 +24,13 @@ import {
   FileText,
   RotateCcw,
   AlertTriangle,
-  Smartphone
+  Wifi,
+  WifiOff,
+  RefreshCw
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { auth, db } from './firebase'
-import { signOut } from "firebase/auth";
-import { doc, setDoc, onSnapshot } from "firebase/firestore";
 import { firestoreService } from './services/firestoreService'
+import { subscribeOfflineQueue } from './services/offlineQueue'
 import { showConfirm, showError, showSuccess } from './utils/alert'
 
 // Register Plugins immediately for all sessions
@@ -40,14 +38,17 @@ pluginLoader.register('discount-engine', DiscountPlugin);
 pluginLoader.register('payment-gateway', PaymentPlugin);
 pluginLoader.register('inventory-sync', InventoryPlugin);
 pluginLoader.register('google-drive', GoogleDrivePlugin);
-pluginLoader.register('loyalty-program', LoyaltyPlugin);
 
 // Removed unused auth/firestore imports for session check
 
-import { useBusiness } from './context/BusinessContext'
-import ThemeToggle from './components/ThemeToggle'
+import PwaInstallPrompt from './components/PwaInstallPrompt'
+import { appConfig } from './config/appConfig'
+import { DEFAULT_STORE_NAME, getCachedStoreName } from './config/storeConfig'
+import { cacheInvoiceTemplateSettings } from './config/invoiceTemplateConfig'
+import { DEFAULT_APP_THEME, cacheAppTheme } from './config/themeConfig'
+import { completePendingSetup } from './services/installerService'
+import { getSetupConfig } from './config/setupConfig'
 const Dashboard = React.lazy(() => import('./pages/Dashboard'))
-const LiveOrders = React.lazy(() => import('./pages/LiveOrders'))
 const Inventory = React.lazy(() => import('./pages/Inventory'))
 const Billing = React.lazy(() => import('./pages/Billing'))
 const Purchases = React.lazy(() => import('./pages/Purchases'))
@@ -62,15 +63,13 @@ const GstReports = React.lazy(() => import('./pages/GstReports'))
 const Cumulative = React.lazy(() => import('./pages/Cumulative'))
 const DebugInvoices = React.lazy(() => import('./pages/DebugInvoices'))
 const Returns = React.lazy(() => import('./pages/Returns'))
-const InstallPage = React.lazy(() => import('./pages/InstallPage'))
-const ShopPage = React.lazy(() => import('./pages/ShopPage'))
 
 function App() {
-  const business = useBusiness()
-  const [isSetupComplete, setIsSetupComplete] = useState(localStorage.getItem('invoiceflow_setup') === 'true')
   const [user, setUser] = useState(null)
   const [role, setRole] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [isOffline, setIsOffline] = useState(() => typeof navigator !== 'undefined' && !navigator.onLine)
+  const [pendingOfflineCount, setPendingOfflineCount] = useState(0)
   // Initialize activeTab from URL or default to 'billing'
   const [activeTab, setActiveTab] = useState(() => {
     const isFileScheme = window.location.protocol === 'file:';
@@ -87,6 +86,7 @@ function App() {
   })
   const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 768)
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768)
+  const [storeName, setStoreName] = useState(getCachedStoreName)
 
   const [showLowStock, setShowLowStock] = useState(false)
   const [notifications, setNotifications] = useState([])
@@ -95,48 +95,106 @@ function App() {
   const [permissionStatus, setPermissionStatus] = useState("Notification" in window ? window.Notification.permission : 'default')
   const previousNotifLength = React.useRef(0)
   const isFirstLoad = React.useRef(true)
+  const setupImportAttempted = React.useRef(false)
 
-  // Theme State
-  const [currentTheme, setCurrentTheme] = useState(() => localStorage.getItem('theme') || 'emerald')
+  // Blue is applied immediately. The admin-selected CSS theme is loaded
+  // from Firestore after the authenticated app session is ready.
+  const [currentTheme, setCurrentTheme] = useState(DEFAULT_APP_THEME)
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', currentTheme)
     localStorage.setItem('theme', currentTheme)
+
+    // Keep the Android/browser system bar aligned with the active admin theme.
+    const themeColorMeta = document.querySelector('meta[name="theme-color"]')
+    const themeColor = getComputedStyle(document.documentElement).getPropertyValue('--background').trim()
+    if (themeColorMeta && themeColor) themeColorMeta.setAttribute('content', themeColor)
+    document.documentElement.style.colorScheme = currentTheme === 'dark' ? 'dark' : 'light'
   }, [currentTheme])
 
-  const baseMenuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'manager'] },
-    { id: 'live_orders', label: business.getTerm('orders'), icon: ChefHat, roles: ['admin', 'manager', 'waiter', 'kitchen'], businessTypes: ['restaurant'] },
-    { id: 'billing', label: business.getTerm('billing'), icon: Plus, roles: ['admin', 'manager', 'cashier', 'waiter'] },
-    { id: 'invoices', label: 'All Invoices', icon: Receipt, roles: ['admin', 'manager', 'cashier'] },
-    { id: 'inventory', label: business.getTerm('inventory'), icon: Package, roles: ['admin', 'manager'] },
-    { id: 'purchases', label: 'Purchase Entry', icon: ShoppingCart, roles: ['admin', 'manager'], businessTypes: ['retail', 'pharmacy', 'grocery', 'other'] },
-    { id: 'suppliers', label: 'Suppliers', icon: Truck, roles: ['admin', 'manager'], businessTypes: ['retail', 'pharmacy', 'grocery', 'other'] },
-    { id: 'customers', label: 'Customers', icon: Users, roles: ['admin', 'manager', 'cashier'] },
-    { id: 'reports', label: 'Reports', icon: BarChart3, roles: ['admin', 'manager'] },
-    { id: 'cumulative', label: 'Cumulative', icon: BarChart3, roles: ['admin'] },
-    { id: 'gst-reports', label: 'GST Reports', icon: FileText, roles: ['admin'], businessTypes: ['retail', 'pharmacy', 'grocery', 'other'] },
-    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['admin', 'manager'], businessTypes: ['retail', 'pharmacy', 'grocery', 'other'] },
-    { id: 'settings', label: 'Settings', icon: LayoutDashboard, roles: ['admin'] },
-  ]
-
-  const menuItems = baseMenuItems.filter(item => {
-    if (role && !item.roles.includes(role)) return false;
-    if (item.businessTypes && !item.businessTypes.includes(business.businessMode)) return false;
-    return true;
-  });
-
-  if (business.integrations?.includes('self_ordering')) {
-    menuItems.splice(2, 0, { id: 'storefront', label: 'Storefront / QR', icon: Smartphone, roles: ['admin'], isExternal: true, path: '/?tab=shop' });
-  }
-
-  if (business.integrations?.includes('kds')) {
-    // KDS is often relevant for restaurants, but could be others. 
-    // If not already in menuItems, add it or adjust logic.
-    if (!menuItems.find(i => i.id === 'live_orders')) {
-        menuItems.splice(1, 0, { id: 'live_orders', label: business.getTerm('kitchen'), icon: ChefHat, roles: ['admin', 'staff'] });
+  useEffect(() => {
+    const handleNetworkChange = () => {
+      const offline = !navigator.onLine
+      setIsOffline(offline)
+      if (!offline && getSetupConfig()?.database?.type === 'firebase') {
+        import('./firebase').then(({ auth }) => {
+          if (!auth.currentUser) return
+          firestoreService.flushOfflineQueue().catch((error) => {
+            console.warn('Offline sync will retry:', error.message)
+          })
+        }).catch(() => {})
+      }
     }
-  }
+
+    window.addEventListener('online', handleNetworkChange)
+    window.addEventListener('offline', handleNetworkChange)
+    const unsubscribeQueue = subscribeOfflineQueue(setPendingOfflineCount)
+    handleNetworkChange()
+
+    return () => {
+      window.removeEventListener('online', handleNetworkChange)
+      window.removeEventListener('offline', handleNetworkChange)
+      unsubscribeQueue()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (user && navigator.onLine && getSetupConfig()?.database?.type === 'firebase') {
+      import('./firebase').then(({ auth }) => {
+        if (!auth.currentUser) return
+        firestoreService.flushOfflineQueue().catch((error) => {
+          console.warn('Offline sync will retry:', error.message)
+        })
+      }).catch(() => {})
+    }
+  }, [user])
+
+  useEffect(() => {
+    document.title = storeName || DEFAULT_STORE_NAME
+  }, [storeName])
+
+  useEffect(() => {
+    if (!user || !role || setupImportAttempted.current) return;
+    setupImportAttempted.current = true;
+    completePendingSetup().catch((error) => {
+      // Keep the POS usable if an optional backup import needs to be retried.
+      setupImportAttempted.current = false;
+      console.warn('Initial setup data import will retry:', error.message)
+    })
+  }, [user, role])
+
+  // Bill layout and seller GST details are shared app settings. The shop
+  // identity itself remains a local default and is not read from Firestore.
+  useEffect(() => {
+    if (!role) return undefined
+    const unsubscribe = firestoreService.subscribeAppSettings('invoice_template', (settings) => {
+      cacheInvoiceTemplateSettings(settings || {})
+    })
+    return () => unsubscribe?.()
+  }, [role])
+
+  useEffect(() => {
+    if (!role) return undefined
+    const unsubscribe = firestoreService.subscribeAppSettings('app_preferences', (settings) => {
+      setCurrentTheme(cacheAppTheme(settings?.theme))
+    })
+    return () => unsubscribe?.()
+  }, [role])
+
+  const menuItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin'] },
+    { id: 'billing', label: 'New Bill', icon: Plus, roles: ['admin', 'staff'] },
+    { id: 'invoices', label: 'All Invoices', icon: Receipt, roles: ['admin', 'staff'] },
+    { id: 'inventory', label: 'Stock / Products', icon: Package, roles: ['admin', 'staff'] },
+    { id: 'purchases', label: 'Purchase Entry', icon: ShoppingCart, roles: ['admin'] },
+    { id: 'suppliers', label: 'Suppliers', icon: Truck, roles: ['admin'] },
+    { id: 'customers', label: 'Customers', icon: Users, roles: ['admin', 'staff'] },
+    { id: 'reports', label: 'Reports', icon: BarChart3, roles: ['admin'] },
+    { id: 'cumulative', label: 'Cumulative', icon: BarChart3, roles: ['admin'] },
+    { id: 'gst-reports', label: 'GST Reports', icon: FileText, roles: ['admin'] },
+    { id: 'returns', label: 'Returns', icon: RotateCcw, roles: ['admin'] },
+    { id: 'settings', label: 'Settings', icon: LayoutDashboard, roles: ['admin', 'dev_admin'] },
+  ]
 
   const requestNotificationPermission = async () => {
     if ("Notification" in window) {
@@ -147,39 +205,93 @@ function App() {
 
   // Check Session on Mount
   useEffect(() => {
-    const checkSession = () => {
+    const setup = getSetupConfig();
+    if (setup?.database?.type !== 'firebase') {
+      const storedUser = localStorage.getItem('invoiceflow_user');
       try {
-        const storedUser = localStorage.getItem('invoiceflow_user');
-        if (storedUser) {
-          const parsedUser = JSON.parse(storedUser);
-          // Check if session is valid (e.g. 2 days expiry)
-          const now = new Date().getTime();
-          const loginTime = parsedUser.loginTime || 0;
-          const twoDays = 2 * 24 * 60 * 60 * 1000;
-
-          if (now - loginTime < twoDays) {
-            setUser(parsedUser);
-            setRole(parsedUser.role);
-
-            // If URL has no tab and is not an invoice view, enforce role-based default
-            const params = new URLSearchParams(window.location.search);
-            const path = window.location.pathname;
-            const isInvoicePath = path.startsWith('/public/invoices/') || path.startsWith('/invoices/') || path.startsWith('/invoice/');
-
-            if (!params.get('tab') && !isInvoicePath) {
-              setActiveTab(parsedUser.role === 'admin' ? 'dashboard' : 'billing');
-            }
-          } else {
-            localStorage.removeItem('invoiceflow_user');
-          }
+        const parsedUser = storedUser ? JSON.parse(storedUser) : null;
+        const isFreshSession = parsedUser?.authProvider === 'local'
+          && Date.now() - Number(parsedUser.loginTime || 0) < 2 * 24 * 60 * 60 * 1000;
+        if (isFreshSession) {
+          setUser(parsedUser);
+          const restoredRole = parsedUser.role || 'admin';
+          setRole(restoredRole);
+          setActiveTab(restoredRole === 'staff' ? 'billing' : 'dashboard');
+        } else {
+          localStorage.removeItem('invoiceflow_user');
         }
-      } catch (e) {
-        console.error("Session parse error:", e);
+      } catch {
+        localStorage.removeItem('invoiceflow_user');
       } finally {
         setLoading(false);
       }
+      return undefined;
     }
-    checkSession();
+
+    let unsubscribe;
+    let disposed = false;
+    Promise.all([import('./firebase'), import('firebase/auth')]).then(([{ auth }, { onAuthStateChanged }]) => {
+      if (disposed) return;
+      unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      try {
+        const storedUser = localStorage.getItem('invoiceflow_user');
+        if (!firebaseUser || !storedUser) {
+          localStorage.removeItem('invoiceflow_user');
+          setUser(null);
+          setRole(null);
+          return;
+        }
+
+        const parsedUser = JSON.parse(storedUser);
+        const now = new Date().getTime();
+        const loginTime = parsedUser.loginTime || 0;
+        const twoDays = 2 * 24 * 60 * 60 * 1000;
+        const token = await firebaseUser.getIdTokenResult(navigator.onLine);
+        const profile = await firestoreService.getUserById(firebaseUser.uid)
+          || await firestoreService.getUserByAuthUidField(firebaseUser.uid);
+        const claimRole = token.claims.role
+          || (token.claims.dev_admin ? 'dev_admin' : token.claims.admin ? 'admin' : null);
+        const trustedRole = ['admin', 'dev_admin', 'staff', 'user'].includes(claimRole)
+          ? claimRole
+          : (['admin', 'dev_admin', 'staff', 'user'].includes(profile?.role) ? profile.role : null);
+        const matchesIdentity = parsedUser.authUid === firebaseUser.uid;
+
+        if (now - loginTime < twoDays && matchesIdentity && trustedRole) {
+          const safeUser = { ...parsedUser, ...(profile || {}), authUid: firebaseUser.uid, email: firebaseUser.email, role: trustedRole };
+          setUser(safeUser);
+          setRole(trustedRole);
+
+          const params = new URLSearchParams(window.location.search);
+          const path = window.location.pathname;
+          const isInvoicePath = path.startsWith('/public/invoices/') || path.startsWith('/invoices/') || path.startsWith('/invoice/');
+          if (!params.get('tab') && !isInvoicePath) {
+            setActiveTab(trustedRole === 'dev_admin' ? 'settings' : trustedRole === 'admin' ? 'dashboard' : 'billing');
+          }
+        } else {
+          localStorage.removeItem('invoiceflow_user');
+          setUser(null);
+          setRole(null);
+        }
+      } catch (e) {
+        console.error("Session validation failed:", e);
+        localStorage.removeItem('invoiceflow_user');
+        setUser(null);
+        setRole(null);
+      } finally {
+        setLoading(false);
+      }
+      });
+    }).catch((error) => {
+      if (!disposed) {
+        console.error("Firebase session initialization failed:", error);
+        setLoading(false);
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
   }, []);
 
   // Low Stock Tracker (Admin Only)
@@ -375,7 +487,11 @@ function App() {
   const filteredMenuItems = menuItems.filter(item => item.roles.includes(role))
 
   const handleLogout = () => {
-    signOut(auth).catch(err => console.error("Sign out error:", err));
+    if (getSetupConfig()?.database?.type === 'firebase') {
+      Promise.all([import('./firebase'), import('firebase/auth')])
+        .then(([{ auth }, { signOut }]) => signOut(auth))
+        .catch(err => console.error("Sign out error:", err));
+    }
     localStorage.removeItem('invoiceflow_user')
     localStorage.removeItem('google_access_token')
     setUser(null)
@@ -406,57 +522,26 @@ function App() {
 
 
   const renderContent = () => {
-    const integrations = business.integrations || []
-    
-    // Redirect logic for specific roles
-    if (role === 'kitchen' && activeTab !== 'live_orders') {
-        return <LiveOrders />
+    const isStaff = role === 'staff'
+    if (role === 'dev_admin' && activeTab !== 'settings') {
+      return <AdminSettings setActiveTab={setActiveTab} role={role} />
     }
-    if (role === 'cashier' && !['billing', 'invoices', 'customers'].includes(activeTab)) {
-        return <Billing setActiveTab={setActiveTab} />
-    }
-
     switch (activeTab) {
-      case 'dashboard': 
-        if (['admin', 'manager'].includes(role)) return <Dashboard setActiveTab={setActiveTab} setShowLowStock={setShowLowStock} />
-        return <Billing setActiveTab={setActiveTab} />
-      case 'live_orders': 
-        if (business.businessMode === 'restaurant' || integrations.includes('kds')) return <LiveOrders />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'billing': return <Billing setActiveTab={setActiveTab} />
-      case 'invoices': return <Billing initialHistory={true} setActiveTab={setActiveTab} />
-      case 'inventory': 
-        if (['admin', 'manager'].includes(role)) return <Inventory isStaff={role !== 'admin'} showLowStock={showLowStock} setShowLowStock={setShowLowStock} />
-        return <Billing setActiveTab={setActiveTab} />
-      case 'purchases': 
-        if (['admin', 'manager'].includes(role) && (integrations.includes('inventory') || business.businessMode !== 'restaurant')) return <Purchases />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'suppliers': 
-        if (['admin', 'manager'].includes(role) && (integrations.includes('inventory') || business.businessMode !== 'restaurant')) return <Suppliers />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'customers': return <Customers isStaff={role === 'cashier' || role === 'waiter'} />
-      case 'reports': 
-        if (['admin', 'manager'].includes(role)) return <Reports />
-        return <Billing setActiveTab={setActiveTab} />
-      case 'cumulative': 
-        if (role === 'admin') return <Cumulative />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'gst-reports': 
-        if (role === 'admin') return <GstReports />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'returns': 
-        if (['admin', 'manager'].includes(role)) return <Returns />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'settings': 
-        if (role === 'admin') return <AdminSettings setActiveTab={setActiveTab} />
-        return <Dashboard setActiveTab={setActiveTab} />
-      case 'audit': 
-        if (role === 'admin') return <DebugInvoices />
-        return <Dashboard setActiveTab={setActiveTab} />
+      case 'dashboard': return role === 'admin' ? <Dashboard setActiveTab={setActiveTab} setShowLowStock={setShowLowStock} /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'billing': return <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'invoices': return <Billing initialHistory={true} isStaff={isStaff} setActiveTab={setActiveTab} /> // Opens Billing in History Mode
+      case 'inventory': return <Inventory isStaff={isStaff} showLowStock={showLowStock} setShowLowStock={setShowLowStock} />
+      case 'purchases': return <Purchases isStaff={isStaff} />
+      case 'suppliers': return <Suppliers />
+      case 'customers': return <Customers isStaff={isStaff} />
+      case 'reports': return role === 'admin' ? <Reports /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'cumulative': return role === 'admin' ? <Cumulative /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'gst-reports': return role === 'admin' ? <GstReports /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'returns': return role === 'admin' ? <Returns /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'settings': return role === 'admin' || role === 'dev_admin' ? <AdminSettings setActiveTab={setActiveTab} role={role} /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
+      case 'audit': return role === 'admin' ? <DebugInvoices /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
       case 'invoice': return <InvoiceView />
-      default: 
-        if (['admin', 'manager'].includes(role)) return <Dashboard setActiveTab={setActiveTab} />
-        return <Billing setActiveTab={setActiveTab} />
+      default: return role === 'dev_admin' ? <AdminSettings setActiveTab={setActiveTab} role={role} /> : role === 'admin' ? <Dashboard /> : <Billing isStaff={isStaff} setActiveTab={setActiveTab} />
     }
   }
 
@@ -468,40 +553,49 @@ function App() {
     )
   }
 
-  if (!isSetupComplete && activeTab !== 'invoice') {
-    return (
+  if (!user && activeTab !== 'invoice') {
+    return (<>
+      <PwaInstallPrompt />
       <React.Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-10 w-10 border-4 border-primary border-t-transparent rounded-full"></div></div>}>
-        <InstallPage onComplete={() => setIsSetupComplete(true)} />
+        <Login onLogin={(u) => { setUser(u); setRole(u.role); setActiveTab(u.role === 'dev_admin' ? 'settings' : u.role === 'admin' ? 'dashboard' : 'billing'); }} />
       </React.Suspense>
-    )
-  }
-
-  if (!user && activeTab !== 'invoice' && activeTab !== 'shop') {
-    return (
-      <React.Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-10 w-10 border-4 border-primary border-t-transparent rounded-full"></div></div>}>
-        <Login onLogin={(u) => { setUser(u); setRole(u.role); setActiveTab(u.role === 'admin' ? 'dashboard' : 'billing'); }} />
-      </React.Suspense>
-    )
+    </>)
   }
 
   // Determine content for public/unauthenticated access or authenticated access
-  const isPublicRoute = activeTab === 'invoice' || activeTab === 'shop';
-  
-  const shopEnabled = business.integrations?.includes('self_ordering');
-
-  const content = isPublicRoute
+  const content = activeTab === 'invoice'
     ? <React.Suspense fallback={<div className="flex h-screen items-center justify-center"><div className="animate-spin h-10 w-10 border-4 border-primary border-t-transparent rounded-full"></div></div>}>
-      {activeTab === 'invoice' ? <InvoiceView /> : (
-          shopEnabled ? <ShopPage /> : <div className="flex h-screen items-center justify-center flex-col gap-4 text-center p-6">
-              <AlertTriangle size={48} className="text-amber-500" />
-              <h1 className="text-2xl font-bold">Feature Disabled</h1>
-              <p className="text-gray-500 max-w-sm">This storefront has been disabled by the administrator or is not part of this business setup.</p>
-              <button onClick={() => window.location.href = '/'} className="px-6 py-2 bg-primary text-white rounded-xl font-bold">Back to POS</button>
-          </div>
-      )}
+      <InvoiceView />
     </React.Suspense>
     : (
       <div className="app-container">
+        {(isOffline || pendingOfflineCount > 0) && (
+          <div
+            className="fixed top-0 left-0 right-0 z-[200] flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold shadow-md"
+            style={{
+              paddingTop: 'max(8px, env(safe-area-inset-top))',
+              background: isOffline ? 'var(--danger)' : 'var(--warning)',
+              color: 'white'
+            }}
+          >
+            {isOffline ? <WifiOff size={14} /> : <Wifi size={14} />}
+            <span>
+              {isOffline
+                ? 'Offline mode — cached data is available. New bills will sync automatically.'
+                : `${pendingOfflineCount} offline ${pendingOfflineCount === 1 ? 'item is' : 'items are'} syncing...`}
+            </span>
+            {!isOffline && pendingOfflineCount > 0 && (
+              <button
+                type="button"
+                onClick={() => firestoreService.flushOfflineQueue()}
+                className="ml-1 inline-flex items-center gap-1 rounded-full bg-white/20 px-2 py-1 text-[10px]"
+              >
+                <RefreshCw size={11} /> Retry
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Mobile Overlay */}
         {isMobile && isSidebarOpen && (
           <div
@@ -534,8 +628,8 @@ function App() {
               </div>
               {(isSidebarOpen || isMobile) && (
                 <div style={{ overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                  <h2 style={{ fontSize: '18px', fontWeight: 700, margin: 0, letterSpacing: '-0.5px' }}>{business.appName}</h2>
-
+                   <h2 style={{ fontSize: '18px', fontWeight: 700, margin: 0, letterSpacing: '-0.5px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{storeName}</h2>
+                   <p style={{ fontSize: '10px', opacity: 0.7, margin: 0, textTransform: 'uppercase' }}>Billing</p>
                 </div>
               )}
             </div>
@@ -545,8 +639,8 @@ function App() {
               {filteredMenuItems.map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => item.isExternal ? window.open(item.path, '_blank') : handleTabChange(item.id)}
-                  className={`sidebar-nav-btn ${(!item.isExternal && activeTab === item.id) ? 'active' : ''}`}
+                  onClick={() => handleTabChange(item.id)}
+                  className={`sidebar-nav-btn ${activeTab === item.id ? 'active' : ''}`}
                 >
                   <item.icon size={20} style={{ minWidth: '20px' }} />
                   {(isSidebarOpen || isMobile) && <span>{item.label}</span>}
@@ -586,8 +680,8 @@ function App() {
                 </div>
                 {(isSidebarOpen || isMobile) && (
                   <div style={{ overflow: 'hidden' }}>
-                    <p style={{ fontSize: '13px', margin: 0, fontWeight: 600 }}>{role === 'admin' ? 'Administrator' : 'Shop Staff'}</p>
-                    <p style={{ fontSize: '11px', margin: 0, opacity: 0.6 }}>{user.username}</p>
+                    <p style={{ fontSize: '13px', margin: 0, fontWeight: 600 }}>{role === 'dev_admin' ? 'Developer Admin' : role === 'admin' ? 'Administrator' : 'Shop Staff'}</p>
+                    <p style={{ fontSize: '11px', margin: 0, opacity: 0.6 }}>{user.name || user.username}</p>
                   </div>
                 )}
               </div>
@@ -604,20 +698,12 @@ function App() {
                 {(isSidebarOpen || isMobile) && <span>Logout</span>}
               </button>
 
-              {/* Theme Toggle */}
-              <div className="px-2 pb-2">
-                <ThemeToggle
-                  currentTheme={currentTheme}
-                  onThemeChange={setCurrentTheme}
-                  isCollapsed={!isSidebarOpen && !isMobile}
-                />
-              </div>
-
               {/* Developer Credit */}
               {(isSidebarOpen || isMobile) && (
-                <div className="text-[10px] text-center text-white/30 mt-2 font-medium">
+                <div className="app-sidebar-footer text-[10px] text-center mt-2 font-medium">
                   <p>Developed by Manas Arora</p>
-                  <a href="https://manas0x.site" target="_blank" rel="noopener noreferrer" className="hover:text-white/60 transition-colors">manas0x.site</a>
+                  <a href="https://manas0x.site" target="_blank" rel="noopener noreferrer" className="transition-colors">manas0x.site</a>
+                  <p className="mt-1">Version v{appConfig.version}</p>
                 </div>
               )}
             </div>
@@ -658,8 +744,8 @@ function App() {
                 <Menu size={20} style={{ color: 'var(--text-main)' }} />
               </button>
               <div>
-                <h2 className="text-xl font-bold leading-none" style={{ color: 'var(--text-main)' }}>{business.appName}</h2>
-
+                <h2 className="text-xl font-bold leading-none max-w-[190px] truncate" style={{ color: 'var(--text-main)' }}>{storeName}</h2>
+                <p className="text-[10px] font-black uppercase tracking-widest text-primary mt-1">Billing</p>
               </div>
             </div>
             {role === 'admin' && (
@@ -753,7 +839,7 @@ function App() {
                 {menuItems.find(i => i.id === activeTab)?.label}
               </h1>
               <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-                Welcome back, {user.username}
+                Welcome back, {user.name || user.username}
               </p>
             </div>
             <div className="text-right flex items-center gap-4">
@@ -898,7 +984,10 @@ function App() {
       </div>
     )
 
-  return content
+  return <>
+    <PwaInstallPrompt />
+    {content}
+  </>
 }
 
 export default App

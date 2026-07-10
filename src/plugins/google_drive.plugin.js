@@ -1,6 +1,7 @@
 import { HardDrive } from 'lucide-react';
 import { firestoreService } from '../services/firestoreService';
 import { googleDriveService } from '../services/googleDriveService';
+import { getCachedStoreName } from '../config/storeConfig';
 
 export const GoogleDrivePlugin = {
     id: 'google-drive',
@@ -40,11 +41,12 @@ export const GoogleDrivePlugin = {
             console.log("Google Drive Backup: Exporting data from Firestore...");
             const data = await firestoreService.exportAllDataJSON();
             const timestamp = new Date().toISOString();
-            const fileName = `Invoice Flow_Backup_${timestamp.split('T')[0]}.json`;
+            const storeSlug = getCachedStoreName().replace(/[^a-z0-9]+/gi, '_');
+            const fileName = `${storeSlug}_Backup_${timestamp.split('T')[0]}.json`;
 
             // 3. Find or Create Folder
             console.log("Google Drive Backup: Accessing Google Drive to find/create folder...");
-            const folderId = await googleDriveService.findOrCreateFolder("Invoice Flow_Backups", accessToken);
+            const folderId = await googleDriveService.findOrCreateFolder(`${storeSlug}_Backups`, accessToken);
 
             // 4. Upload to Folder
             console.log("Google Drive Backup: Uploading JSON to Google Drive...");
