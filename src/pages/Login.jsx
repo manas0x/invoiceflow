@@ -1,12 +1,42 @@
 import React, { useState } from 'react'
-import { auth, db } from '../firebase'
-import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore'
-import { ShieldCheck, User, Lock, ExternalLink, Activity, Info, Package, Mail, Loader2, UtensilsCrossed, ShoppingBag, Pill, Store } from 'lucide-react';
-import { useBusiness } from '../context/BusinessContext';
-import { signInWithEmailAndPassword, signInWithRedirect, getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup } from 'firebase/auth'
+import { Package, Lock, UserRound, Loader2 } from 'lucide-react'
+import { getCachedStoreName } from '../config/storeConfig'
+import { appConfig } from '../config/appConfig'
+import { firestoreService } from '../services/firestoreService'
+import { authenticateLocalUser, isLocalAuthMode } from '../services/localAuth'
+
+const loadFirebaseAuth = () => Promise.all([
+    import('../firebase'),
+    import('firebase/auth')
+])
+
+const getProfileForFirebaseUser = async (firebaseUser) => {
+    const [{ db }, { doc, getDocFromServer }] = await Promise.all([
+        import('../firebase'),
+        import('firebase/firestore')
+    ])
+    const directProfile = await getDocFromServer(doc(db, 'users', firebaseUser.uid))
+    if (directProfile.exists()) {
+        return { id: directProfile.id, ...directProfile.data() }
+    }
+    return firestoreService.getUserByAuthUidField(firebaseUser.uid)
+}
+
+const getTrustedRole = async (firebaseUser, profile) => {
+    const token = await firebaseUser.getIdTokenResult(navigator.onLine);
+    const claimRole = token.claims.role;
+    if (['admin', 'dev_admin', 'staff', 'user'].includes(claimRole)) {
+        return claimRole;
+    }
+    if (token.claims.dev_admin === true) return 'dev_admin';
+    if (token.claims.admin === true) return 'admin';
+    if (['admin', 'dev_admin', 'staff', 'user'].includes(profile?.role)) return profile.role;
+    return null;
+};
 
 const Login = ({ onLogin }) => {
-    const business = useBusiness();
+    const storeName = getCachedStoreName()
+    const usesLocalAuth = isLocalAuthMode()
     const [username, setUsername] = useState('')
     const [password, setPassword] = useState('')
     const [loading, setLoading] = useState(false)
@@ -25,6 +55,10 @@ const Login = ({ onLogin }) => {
 
         const checkAuthStatus = async () => {
             try {
+                if (usesLocalAuth) {
+                    setIsChecking(false);
+                    return;
+                }
                 // Safety timeout (5s) to reveal login form if Firebase is silent
                 timeoutId = setTimeout(() => {
                     if (isModuleMounted && !processingAuth.current) {
@@ -32,12 +66,21 @@ const Login = ({ onLogin }) => {
                     }
                 }, 5000);
 
+                const [{ auth }, { onAuthStateChanged }] = await loadFirebaseAuth();
                 unsubAuth = onAuthStateChanged(auth, async (user) => {
                     if (!isModuleMounted) return;
                     
                     if (isManualLogin.current) return;
 
                     if (user && !processingAuth.current) {
+                        // After logout Firebase may briefly publish the old
+                        // user while the app session has already been removed.
+                        // Do not run a Firestore profile lookup in that window.
+                        if (!localStorage.getItem('invoiceflow_user') || auth.currentUser?.uid !== user.uid) {
+                            if (timeoutId) clearTimeout(timeoutId);
+                            setIsChecking(false);
+                            return;
+                        }
                         if (timeoutId) clearTimeout(timeoutId);
                         await handleAuthSuccess(user);
                     } else if (!user) {
@@ -61,7 +104,7 @@ const Login = ({ onLogin }) => {
             if (unsubAuth) unsubAuth();
             if (timeoutId) clearTimeout(timeoutId);
         };
-    }, []);
+    }, [usesLocalAuth]);
 
     const handleAuthSuccess = async (firebaseUser, credential = null) => {
         if (processingAuth.current) return;
@@ -72,12 +115,12 @@ const Login = ({ onLogin }) => {
         try {
             const accessToken = credential?.accessToken;
 
-            // Fetch role from Firestore by email
-            const { firestoreService } = await import('../services/firestoreService');
-            console.log(`Login: Fetching profile for ${firebaseUser.email}...`);
-            const appUser = await firestoreService.getUserByEmail(firebaseUser.email);
+            console.log(`Login: Fetching profile for ${firebaseUser.uid}...`);
+            let appUser = await getProfileForFirebaseUser(firebaseUser);
 
-            if (appUser) {
+            const trustedRole = await getTrustedRole(firebaseUser, appUser);
+            if (appUser && trustedRole) {
+                appUser = { ...appUser, role: trustedRole, authUid: firebaseUser.uid };
                 console.log("Login: Profile found. Saving session...");
                 const sessionData = {
                     ...appUser,
@@ -95,54 +138,46 @@ const Login = ({ onLogin }) => {
                 // Update plugin settings
                 const { pluginLoader: loader } = await import('../pluginLoader');
                 const drivePlugin = loader.getPlugin('google-drive');
-                if (drivePlugin) {
+                const googleEmail = (firebaseUser.email || '').trim().toLowerCase();
+                const assignedProfileEmails = [appUser.email, appUser.authEmail]
+                    .filter(Boolean)
+                    .map(email => String(email).trim().toLowerCase());
+                const isAdministrator = trustedRole === 'admin' || trustedRole === 'dev_admin';
+                const isAssignedAdministratorAccount = isAdministrator
+                    && (!assignedProfileEmails.length || assignedProfileEmails.includes(googleEmail));
+
+                if (drivePlugin && isAssignedAdministratorAccount) {
                     drivePlugin.settings.backupEmail = firebaseUser.email;
                     loader.saveStates();
                 }
 
-                // Trigger Auto-Backup logic (omitted for brevity, assume handled similarly)
-                // ... (existing auto-backup logic)
-                if (firebaseUser.email !== 'admin@manas0x.site') {
-                    const plugin = loader.getPlugin('google-drive');
-                    if (plugin && plugin.enabled && plugin.settings.autoBackup) {
-                        const now = new Date();
-                        const last = plugin.settings.lastBackup ? new Date(plugin.settings.lastBackup) : null;
-                        const diffDays = last ? (now - last) / (1000 * 60 * 60 * 24) : 999;
-                        if (diffDays >= (plugin.settings.backupFrequency || 1)) {
-                            const currentToken = accessToken || localStorage.getItem('google_access_token');
-                            
-                            // Only attempt auto-backup if we actually have a token.
-                            // Tokens are not persistent across page reloads in Firebase Auth by default.
-                            if (currentToken) {
-                                setTimeout(async () => {
-                                    try {
-                                        const { GoogleDrivePlugin } = await import('../plugins/google_drive.plugin');
-                                        await GoogleDrivePlugin.performBackup({
-                                            ...plugin.settings,
-                                            accessToken: currentToken,
-                                            isFromSession: true
-                                        }, (newSettings) => {
-                                            plugin.settings = newSettings;
-                                            loader.saveStates();
-                                        });
-                                    } catch (e) { 
-                                        // Silent warning for token errors during auto-sessions
-                                        if (e.message?.includes('Token required')) {
-                                            console.log("Login: Auto-backup skipped (Token not available for this session)");
-                                        } else {
-                                            console.error("Auto-backup failed", e); 
-                                        }
-                                    }
-                                }, 1000);
-                            } else {
-                                console.log("Login: Auto-backup pending (Google account re-auth required for Drive access)");
-                            }
+                // A successful Google login provides the Drive token needed for
+                // the store backup. Trigger the backup immediately instead of
+                // waiting for the configured multi-day backup interval.
+                const plugin = loader.getPlugin('google-drive');
+                const currentToken = accessToken || localStorage.getItem('google_access_token');
+                if (accessToken && isAssignedAdministratorAccount && plugin && plugin.enabled && plugin.settings.autoBackup && currentToken) {
+                    setTimeout(async () => {
+                        try {
+                            const { GoogleDrivePlugin } = await import('../plugins/google_drive.plugin');
+                            await GoogleDrivePlugin.performBackup({
+                                ...plugin.settings,
+                                accessToken: currentToken,
+                                isFromSession: true
+                            }, (newSettings) => {
+                                plugin.settings = newSettings;
+                                loader.saveStates();
+                            });
+                        } catch (e) {
+                            console.error("Login: Immediate Google Drive backup failed", e);
                         }
-                    }
+                    }, 300);
                 }
             } else {
                 console.warn(`Login: No profile for ${firebaseUser.email}`);
-                setError(`Google Login successful, but no user profile found for ${firebaseUser.email}. Please contact the administrator.`);
+                const [{ auth }, { signOut }] = await loadFirebaseAuth();
+                await signOut(auth);
+                setError(`Authentication succeeded, but this Firebase account is not linked to an app profile. Contact an administrator.`);
                 setIsChecking(false);
             }
         } catch (err) {
@@ -159,76 +194,44 @@ const Login = ({ onLogin }) => {
         e.preventDefault()
         setLoading(true)
         setError('')
+        isManualLogin.current = true
 
         try {
-            // 1. Authenticate with Firebase Auth
-            // If user enters "admin", treat as "admin@manas0x.site"
-            const email = username.includes('@') ? username : `${username}@manas0x.site`
+            const normalizedUsername = username.trim().toLowerCase()
+            if (!normalizedUsername) {
+                throw new Error('Enter your username.')
+            }
 
-            const userCredential = await signInWithEmailAndPassword(auth, email, password)
+            if (normalizedUsername.includes('@')) {
+                throw new Error('Enter username only, not an email address.')
+            }
+
+            if (usesLocalAuth) {
+                const sessionData = await authenticateLocalUser(normalizedUsername, password);
+                localStorage.setItem('invoiceflow_user', JSON.stringify(sessionData));
+                onLogin(sessionData);
+                return;
+            }
+
+            const loginEmail = `${normalizedUsername}@${appConfig.passwordAuthDomain}`
+            const [{ auth }, { signInWithEmailAndPassword }] = await loadFirebaseAuth();
+            const userCredential = await signInWithEmailAndPassword(auth, loginEmail, password)
             const firebaseUser = userCredential.user
 
-            // 2. Fetch User Details (Role) from Firestore
-            const usersRef = collection(db, 'users')
+            // Resolve only by Firebase UID or an administrator-created
+            // identity link. Email ownership is not treated as a role.
+            let appUser = await getProfileForFirebaseUser(firebaseUser)
 
-            // Try fetching by Auth UID first (Best Practice)
-            let appUser = null
-            try {
-                const userDocRef = doc(db, 'users', firebaseUser.uid)
-                const userDocSnap = await getDoc(userDocRef)
-                if (userDocSnap.exists()) {
-                    appUser = { id: userDocSnap.id, ...userDocSnap.data() }
-                }
-            } catch (ignore) {
-                // Ignore errors here, fallback to query
-            }
-
-            if (!appUser) {
-                // Fallback: Query by username (e.g. 'admin')
-                // 1. Try Exact Match
-                let q = query(usersRef, where('username', '==', username))
-                let querySnapshot = await getDocs(q)
-
-                // 2. Try Clean Name (if email)
-                if (querySnapshot.empty && username.includes('@')) {
-                    const cleanName = username.split('@')[0]
-                    q = query(usersRef, where('username', '==', cleanName))
-                    querySnapshot = await getDocs(q)
-                }
-
-                // 3. Try Lowercase
-                if (querySnapshot.empty) {
-                    q = query(usersRef, where('username', '==', username.toLowerCase()))
-                    querySnapshot = await getDocs(q)
-                }
-
-                // 4. Try Uppercase
-                if (querySnapshot.empty) {
-                    q = query(usersRef, where('username', '==', username.toUpperCase()))
-                    querySnapshot = await getDocs(q)
-                }
-
-                if (!querySnapshot.empty) {
-                    const doc = querySnapshot.docs[0]
-                    appUser = { id: doc.id, ...doc.data() }
-                }
-            } else {
-                // Fallback: If no Firestore doc exists, assume Admin role for this special email or handle as error
-                // For now, let's create a minimal session based on Auth info
-                console.warn("No Firestore profile found for this user. Using default admin role if email matches.")
-                if (email === 'admin@manas0x.site') {
-                    appUser = { id: firebaseUser.uid, username: 'admin', role: 'admin', name: 'Administrator' }
-                }
-            }
-
-            if (appUser) {
+            const trustedRole = await getTrustedRole(firebaseUser, appUser)
+            if (appUser && trustedRole) {
                 // Save session in localStorage (simulating persistence) with 2-day expiry tracking
-                const sessionData = { ...appUser, loginTime: Date.now() }
+                const sessionData = { ...appUser, role: trustedRole, authUid: firebaseUser.uid, loginTime: Date.now() }
                 localStorage.setItem('invoiceflow_user', JSON.stringify(sessionData))
                 onLogin(sessionData)
             } else {
-                setError(`Login successful (UID: ${firebaseUser.uid}), but no user profile found for '${username}'.`)
-                // Optional: auth.signOut() here
+                setError(`Login succeeded, but this Firebase account is not linked to an app profile.`)
+                const [{ auth }, { signOut }] = await loadFirebaseAuth();
+                await signOut(auth)
             }
 
         } catch (err) {
@@ -240,13 +243,19 @@ const Login = ({ onLogin }) => {
             }
         } finally {
             setLoading(false)
+            isManualLogin.current = false
         }
     }
 
     const handleGoogleLogin = async () => {
+        if (usesLocalAuth) {
+            setError('Google login is disabled for SQL mode. Use the administrator account created during setup.');
+            return;
+        }
         setLoading(true);
         setError('');
         isManualLogin.current = true;
+        const [{ auth }, { GoogleAuthProvider, signInWithPopup }] = await loadFirebaseAuth();
         const provider = new GoogleAuthProvider();
         provider.addScope('https://www.googleapis.com/auth/drive.file');
         provider.setCustomParameters({ prompt: 'select_account' });
@@ -293,13 +302,10 @@ const Login = ({ onLogin }) => {
                         justifyContent: 'center',
                         margin: '0 auto 16px'
                     }}>
-                        {business.businessMode === 'restaurant' ? <UtensilsCrossed size={32} color="white" /> : 
-                         business.businessMode === 'grocery' ? <ShoppingBag size={32} color="white" /> :
-                         business.businessMode === 'pharmacy' ? <Pill size={32} color="white" /> :
-                         <Store size={32} color="white" />}
+                        <Package size={32} color="white" />
                     </div>
                     <h2 style={{ fontSize: '24px', color: 'var(--text-main)' }}>Welcome Back</h2>
-                    <p style={{ color: 'var(--text-muted)' }}>Login to {business.appName}</p>
+                    <p style={{ color: 'var(--text-muted)' }}>Login to {storeName}</p>
                 </div>
 
                 {storageRestricted && (
@@ -336,10 +342,10 @@ const Login = ({ onLogin }) => {
                     <div className="form-group">
                         <label>Username</label>
                         <div style={{ position: 'relative' }}>
-                            <Mail size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                            <UserRound size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
                             <input
                                 type="text"
-                                placeholder="Enter username"
+                                placeholder="Enter your username"
                                 value={username}
                                 onChange={(e) => setUsername(e.target.value)}
                                 style={{ paddingLeft: '40px' }}
@@ -371,12 +377,12 @@ const Login = ({ onLogin }) => {
                     >
                         {loading ? <Loader2 className="animate-spin" size={20} /> : 'Sign In'}
                     </button>
-                    <div style={{ margin: '20px 0', textAlign: 'center', position: 'relative' }}>
+                    {!usesLocalAuth && <div style={{ margin: '20px 0', textAlign: 'center', position: 'relative' }}>
                         <div style={{ borderTop: '1px solid var(--border)', position: 'absolute', top: '50%', width: '100%' }}></div>
                         <span style={{ background: 'var(--background)', color: 'var(--text-muted)', fontSize: '10px', padding: '0 10px', position: 'relative', textTransform: 'uppercase', tracking: '1px' }}>Or continue with</span>
-                    </div>
+                    </div>}
 
-                    <button
+                    {!usesLocalAuth && <button
                         type="button"
                         onClick={handleGoogleLogin}
                         disabled={loading}
@@ -390,7 +396,7 @@ const Login = ({ onLogin }) => {
                             <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
                         </svg>
                         {loading ? <Loader2 className="animate-spin" size={20} /> : 'Sign in with Google'}
-                    </button>
+                    </button>}
                 </form>
 
                 <div style={{ marginTop: '24px', textAlign: 'center' }}>

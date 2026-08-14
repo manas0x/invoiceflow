@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react'
-import { Plus, Search, MapPin, Phone, Edit2, Trash2, X, ShoppingBag, User, Wallet } from 'lucide-react'
+import { Plus, Search, MapPin, Phone, Edit2, Trash2, X, ShoppingBag, User, Wallet, FileText, Download, Calendar } from 'lucide-react'
 import { firestoreService } from '../services/firestoreService'
 import { showError, showConfirm, showSuccess } from '../utils/alert'
-import { useBusiness } from '../context/BusinessContext'
+import { generateSupplierLedgerPDF } from '../utils/pdfGenerator'
 
 const Suppliers = () => {
-    const business = useBusiness()
     const [suppliers, setSuppliers] = useState([])
     const [purchases, setPurchases] = useState([])
     const [payments, setPayments] = useState([])
@@ -13,7 +12,9 @@ const Suppliers = () => {
     const [selectedSupplier, setSelectedSupplier] = useState(null)
     const [isFormOpen, setIsFormOpen] = useState(false)
     const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false)
+    const [isExportModalOpen, setIsExportModalOpen] = useState(false)
     const [loading, setLoading] = useState(true)
+    const [dateRange, setDateRange] = useState({ start: '', end: '' })
 
     // Form data for Supplier Create/Edit
     const [formData, setFormData] = useState({
@@ -31,6 +32,8 @@ const Suppliers = () => {
         mode: 'Cash',
         note: ''
     })
+
+    const normalizeSupplierName = (name) => (name || '').trim().toLowerCase()
 
     useEffect(() => {
         const unsubSuppliers = firestoreService.subscribeSuppliers(setSuppliers)
@@ -116,8 +119,12 @@ const Suppliers = () => {
         if (!selectedSupplier) return { transactions: [], totals: { purchase: 0, paid: 0, due: 0 } }
 
         // 1. Get Purchases
+        const selectedSupplierName = normalizeSupplierName(selectedSupplier.name)
         const suppPurchases = purchases
-            .filter(p => p.supplierName === selectedSupplier.name)
+            .filter(p =>
+                (p.supplierId && p.supplierId === selectedSupplier.id) ||
+                normalizeSupplierName(p.supplierName) === selectedSupplierName
+            )
             .map(p => ({
                 id: p.id,
                 dbId: p.docId,
@@ -132,7 +139,10 @@ const Suppliers = () => {
 
         // 2. Get Payments
         const suppPayments = payments
-            .filter(p => p.supplierId === selectedSupplier.id || p.supplierName === selectedSupplier.name)
+            .filter(p =>
+                p.supplierId === selectedSupplier.id ||
+                normalizeSupplierName(p.supplierName) === selectedSupplierName
+            )
             .map(p => ({
                 id: p.id,
                 dbId: p.id,
@@ -174,13 +184,50 @@ const Suppliers = () => {
 
     const { transactions, totals } = getSupplierLedger()
 
+    const handleExportPDF = () => {
+        if (!selectedSupplier) return
+
+        const allTransactionsChronological = [...transactions].reverse()
+        const transactionsInPeriod = allTransactionsChronological.filter(t => {
+            const afterStart = dateRange.start ? t.date >= dateRange.start : true
+            const beforeEnd = dateRange.end ? t.date <= dateRange.end : true
+            return afterStart && beforeEnd
+        })
+
+        const firstTransactionIndex = allTransactionsChronological.findIndex(t =>
+            transactionsInPeriod.length > 0 && t.id === transactionsInPeriod[0].id
+        )
+        const openingBalance = firstTransactionIndex > 0
+            ? allTransactionsChronological[firstTransactionIndex - 1].balance
+            : 0
+        const periodPurchase = transactionsInPeriod
+            .filter(t => t.type === 'PURCHASE')
+            .reduce((sum, t) => sum + t.amount, 0)
+        const periodPaid = transactionsInPeriod
+            .filter(t => t.type === 'PAYMENT')
+            .reduce((sum, t) => sum + t.amount, 0)
+
+        generateSupplierLedgerPDF(
+            selectedSupplier,
+            transactionsInPeriod,
+            {
+                purchase: periodPurchase,
+                paid: periodPaid,
+                due: openingBalance + periodPurchase - periodPaid,
+                openingBalance
+            },
+            dateRange
+        )
+        setIsExportModalOpen(false)
+    }
+
     return (
         <div className="suppliers-page h-[calc(100vh-100px)] flex flex-col md:flex-row gap-6">
             {/* Left Panel: Supplier List */}
             <div className={`flex-1 flex flex-col gap-4 ${selectedSupplier ? 'hidden md:flex' : 'flex'}`}>
                 <div className="flex justify-between items-center p-4 rounded-xl shadow-sm border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                     <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
-                        <User className="text-primary" /> {business.getTerm('suppliers')}
+                        <User className="text-primary" /> Suppliers
                     </h2>
                     <button
                         onClick={() => { setFormData({ id: null, name: '', phone: '', address: '' }); setIsFormOpen(true) }}
@@ -256,6 +303,7 @@ const Suppliers = () => {
                             <div className="flex justify-between items-start mb-6">
                                 <div className="w-full">
                                     <button onClick={() => setSelectedSupplier(null)} className="md:hidden mb-2 hover:opacity-80 flex items-center gap-1 text-sm font-bold" style={{ color: 'var(--text-muted)' }}><X size={16} /> Back</button>
+                                    <div className="text-xs font-black uppercase tracking-widest text-primary mb-2">Purchase Ledger</div>
                                     <h1 className="text-2xl font-black leading-none" style={{ color: 'var(--text-main)' }}>{selectedSupplier.name}</h1>
                                     <div className="flex flex-wrap gap-4 mt-3 text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
                                         {selectedSupplier.phone && <span className="flex items-center gap-1.5 px-3 py-1 rounded-full border shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}><Phone size={14} className="text-primary" /> {selectedSupplier.phone}</span>}
@@ -270,21 +318,28 @@ const Suppliers = () => {
                                     >
                                         <Wallet size={18} /> Add Payment
                                     </button>
+                                    <button
+                                        onClick={() => setIsExportModalOpen(true)}
+                                        className="text-xs font-bold flex items-center gap-2 px-4 py-2 rounded-xl border transition-all shadow-sm active:scale-95"
+                                        style={{ background: 'var(--surface)', color: 'var(--text-muted)', borderColor: 'var(--border)' }}
+                                    >
+                                        <Download size={14} /> Export Statement PDF
+                                    </button>
                                 </div>
                             </div>
 
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                                 <div className="p-4 rounded-xl border shadow-sm" style={{ background: 'var(--surface)', borderColor: '#dbeafe' }}>
                                     <div className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-1">Total Purchase</div>
-                                    <div className="text-xl font-black text-blue-700">{business.currency}{totals.purchase.toLocaleString()}</div>
+                                    <div className="text-xl font-black text-blue-700">Rs.{totals.purchase.toLocaleString()}</div>
                                 </div>
                                 <div className="p-4 rounded-xl border shadow-sm" style={{ background: 'var(--surface)', borderColor: '#dcfce7' }}>
                                     <div className="text-xs font-bold text-green-400 uppercase tracking-widest mb-1">Total Paid</div>
-                                    <div className="text-xl font-black text-green-700">{business.currency}{totals.paid.toLocaleString()}</div>
+                                    <div className="text-xl font-black text-green-700">Rs.{totals.paid.toLocaleString()}</div>
                                 </div>
                                 <div className="p-4 rounded-xl border shadow-sm" style={{ background: totals.due > 0 ? 'rgba(254, 226, 226, 0.2)' : 'var(--surface)', borderColor: totals.due > 0 ? '#fee2e2' : 'var(--border)' }}>
                                     <div className={`text-xs font-bold uppercase tracking-widest mb-1 ${totals.due > 0 ? 'text-red-400' : ''}`} style={{ color: totals.due > 0 ? undefined : 'var(--text-muted)' }}>Net Due</div>
-                                    <div className={`text-xl font-black ${totals.due > 0 ? 'text-red-600' : ''}`} style={{ color: totals.due > 0 ? undefined : 'var(--text-main)' }}>{business.currency}{totals.due.toLocaleString()}</div>
+                                    <div className={`text-xl font-black ${totals.due > 0 ? 'text-red-600' : ''}`} style={{ color: totals.due > 0 ? undefined : 'var(--text-main)' }}>Rs.{totals.due.toLocaleString()}</div>
                                 </div>
                             </div>
                         </div>
@@ -313,13 +368,13 @@ const Suppliers = () => {
                                                 {t.note && <div className="text-xs mt-1 italic" style={{ color: 'var(--text-muted)' }}>{t.note}</div>}
                                             </td>
                                             <td className="px-6 py-4 text-right font-bold text-blue-600" style={{ background: 'rgba(59, 130, 246, 0.05)' }}>
-                                                {t.type === 'PURCHASE' ? `${business.currency}${t.amount.toLocaleString()}` : '-'}
+                                                {t.type === 'PURCHASE' ? `Rs.${t.amount.toLocaleString()}` : '-'}
                                             </td>
                                             <td className="px-6 py-4 text-right font-bold text-green-600" style={{ background: 'rgba(16, 185, 129, 0.05)' }}>
-                                                {t.type === 'PAYMENT' ? `${business.currency}${t.amount.toLocaleString()}` : '-'}
+                                                {t.type === 'PAYMENT' ? `Rs.${t.amount.toLocaleString()}` : '-'}
                                             </td>
                                             <td className="px-6 py-4 text-right font-black" style={{ color: 'var(--text-main)' }}>
-                                                {business.currency}{t.balance.toLocaleString()}
+                                                Rs.{t.balance.toLocaleString()}
                                                 <span className="text-[10px] ml-1 font-normal" style={{ color: 'var(--text-muted)' }}>
                                                     {t.balance > 0 ? 'Dr' : 'Cr'}
                                                 </span>
@@ -365,7 +420,7 @@ const Suppliers = () => {
                                 <input
                                     className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-opacity-20 transition-all font-medium"
                                     style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
-                                    placeholder="e.g. IFFCO Center"
+                                    placeholder="e.g. Main Supplier"
                                     value={formData.name}
                                     onChange={e => setFormData({ ...formData, name: e.target.value })}
                                     autoFocus
@@ -419,7 +474,7 @@ const Suppliers = () => {
                         </div>
                         <form onSubmit={handlePaymentSave} className="p-6 space-y-4">
                             <div>
-                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount Paid ({business.currency})</label>
+                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount Paid (Rs.)</label>
                                 <input
                                     className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-green-500/20 focus:border-green-500 transition-all font-black text-xl text-green-700"
                                     style={{ background: 'var(--background)', borderColor: 'var(--border)' }}
@@ -468,6 +523,52 @@ const Suppliers = () => {
                                 Save Payment
                             </button>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {isExportModalOpen && (
+                <div className="fixed inset-0 backdrop-blur-sm z-[200] flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.5)' }}>
+                    <div className="rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95 duration-200" style={{ background: 'var(--surface)' }}>
+                        <div className="p-5 border-b flex justify-between items-center" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
+                            <h3 className="text-lg font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}><Download className="text-primary" size={20} /> Export Statement</h3>
+                            <button onClick={() => setIsExportModalOpen(false)} className="transition-colors" style={{ color: 'var(--text-muted)' }}><X size={20} /></button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Start Date (Optional)</label>
+                                <div className="relative">
+                                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} size={16} />
+                                    <input
+                                        className="w-full pl-10 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-primary/20 transition-all font-medium"
+                                        type="date"
+                                        value={dateRange.start}
+                                        onChange={e => setDateRange({ ...dateRange, start: e.target.value })}
+                                        style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
+                                    />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>End Date (Optional)</label>
+                                <div className="relative">
+                                    <Calendar className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} size={16} />
+                                    <input
+                                        className="w-full pl-10 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-primary/20 transition-all font-medium"
+                                        type="date"
+                                        value={dateRange.end}
+                                        onChange={e => setDateRange({ ...dateRange, end: e.target.value })}
+                                        style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
+                                    />
+                                </div>
+                            </div>
+                            <button
+                                onClick={handleExportPDF}
+                                className="w-full font-bold py-4 rounded-xl shadow-lg transition-all hover:scale-[1.02] active:scale-95 mt-4 flex items-center justify-center gap-2"
+                                style={{ background: 'var(--primary)', color: 'white', boxShadow: '0 4px 15px rgba(0,0,0,0.1)' }}
+                            >
+                                <Download size={20} /> Download PDF
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

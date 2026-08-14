@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { firestoreService } from '../services/firestoreService';
 import { Search, FileText, User } from 'lucide-react';
-import { useBusiness } from '../context/BusinessContext';
 
 const DebugInvoices = () => {
-    const business = useBusiness();
     const [invoices, setInvoices] = useState([]);
     const [searchTerm, setSearchTerm] = useState('');
 
@@ -36,11 +34,11 @@ const DebugInvoices = () => {
                 </div>
                 <div className="card p-4 bg-blue-50 border-blue-100 rounded-2xl">
                     <p className="text-[10px] font-black uppercase text-blue-600 tracking-widest mb-1">Sum of All Sales</p>
-                    <h3 className="text-2xl font-black text-blue-700">{business.currency}{invoices.reduce((acc, inv) => acc + (Number(inv.totalAmount) || 0), 0).toLocaleString()}</h3>
+                    <h3 className="text-2xl font-black text-blue-700">Rs.{invoices.reduce((acc, inv) => acc + (Number(inv.totalAmount) || 0), 0).toLocaleString()}</h3>
                 </div>
                 <div className="card p-4 bg-orange-50 border-orange-100 rounded-2xl">
                     <p className="text-[10px] font-black uppercase text-orange-600 tracking-widest mb-1">Credit Sales Total</p>
-                    <h3 className="text-2xl font-black text-orange-700">{business.currency}{invoices.filter(i => (i.paymentMode || '').toLowerCase() === 'credit').reduce((acc, i) => acc + (Number(i.totalAmount) || 0), 0).toLocaleString()}</h3>
+                    <h3 className="text-2xl font-black text-orange-700">Rs.{invoices.filter(i => (i.paymentMode || '').toLowerCase() === 'credit').reduce((acc, i) => acc + (Number(i.totalAmount) || 0), 0).toLocaleString()}</h3>
                 </div>
             </div>
 
@@ -95,7 +93,7 @@ const DebugInvoices = () => {
                                         {inv.paymentMode}
                                     </span>
                                 </td>
-                                <td className="px-6 py-4 text-right font-black">{business.currency}{Number(inv.totalAmount).toLocaleString()}</td>
+                                <td className="px-6 py-4 text-right font-black">Rs.{Number(inv.totalAmount).toLocaleString()}</td>
                             </tr>
                         ))}
                     </tbody>

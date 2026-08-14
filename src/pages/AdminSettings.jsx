@@ -1,12 +1,16 @@
 import React, { useState } from 'react';
-import { Database, Shield, Lock, Unlock, CheckCircle, Database as DatabaseIcon, AlertTriangle, Puzzle, Globe, BarChart, Zap, X, Users, UserPlus, Trash2, HardDrive, Edit, History, Store } from 'lucide-react';
+import { Database, Shield, Lock, Unlock, CheckCircle, Database as DatabaseIcon, AlertTriangle, Puzzle, Globe, BarChart, Zap, X, Users, UserPlus, Trash2, HardDrive, Edit, History } from 'lucide-react';
 import { pluginLoader } from '../pluginLoader';
 import { firestoreService } from '../services/firestoreService';
 import { showSuccess, showError } from '../utils/alert';
-import { auth } from '../firebase';
-import { useBusiness } from '../context/BusinessContext';
+import { authenticateLocalUser, createAdminCredentials, isLocalAuthMode } from '../services/localAuth';
+import { cacheInvoiceTemplateSettings, getInvoiceTemplateSettings } from '../config/invoiceTemplateConfig';
+import { DEFAULT_APP_THEME, normalizeAppTheme } from '../config/themeConfig';
+import { getCachedStoreName } from '../config/storeConfig';
+import { getSetupConfig, saveSetupConfig } from '../config/setupConfig';
+import { persistSetupOnServer } from '../services/installerService';
 
-const AdminSettings = ({ setActiveTab }) => {
+const AdminSettings = ({ setActiveTab, role: sessionRole }) => {
     const [isUnlocked, setIsUnlocked] = React.useState(false);
     const [password, setPassword] = React.useState('');
     const [isProcessing, setIsProcessing] = React.useState(false);
@@ -22,8 +26,7 @@ const AdminSettings = ({ setActiveTab }) => {
         username: '',
         name: '',
         role: 'staff',
-        password: '',
-        email: ''
+        password: ''
     });
     const [editingUserId, setEditingUserId] = React.useState(null);
     const [emailSettings, setEmailSettings] = React.useState({
@@ -36,17 +39,8 @@ const AdminSettings = ({ setActiveTab }) => {
     });
     const [invoiceCount, setInvoiceCount] = React.useState(0);
     const [manualInvoiceCount, setManualInvoiceCount] = React.useState('');
-    const business = useBusiness();
-    const [businessProfile, setBusinessProfile] = React.useState({
-        shopName: '',
-        businessType: 'retail',
-        address: '',
-        phone: '',
-        gstNumber: '',
-        currency: '₹',
-        timezone: 'Asia/Kolkata',
-        theme: 'emerald'
-    });
+    const [invoiceTemplateSettings, setInvoiceTemplateSettings] = React.useState(getInvoiceTemplateSettings);
+    const [appTheme, setAppTheme] = React.useState(DEFAULT_APP_THEME);
 
     const fetchUsers = async () => {
         try {
@@ -66,11 +60,6 @@ const AdminSettings = ({ setActiveTab }) => {
             // Fetch last backup from DB
             const syncBackupState = async () => {
                 try {
-                    const storeData = await firestoreService.getAppSettings('store_info');
-                    if (storeData) {
-                        setBusinessProfile(prev => ({ ...prev, ...storeData }));
-                    }
-
                     const backupSettings = await firestoreService.getAppSettings('google_drive_backup');
                     if (backupSettings?.lastBackup) {
                         const plugin = pluginLoader.getPlugin('google-drive');
@@ -86,6 +75,14 @@ const AdminSettings = ({ setActiveTab }) => {
                     if (emailData) {
                         setEmailSettings(prev => ({ ...prev, ...emailData }));
                     }
+
+                    const invoiceTemplate = await firestoreService.getAppSettings('invoice_template');
+                    if (invoiceTemplate) {
+                        setInvoiceTemplateSettings(cacheInvoiceTemplateSettings(invoiceTemplate));
+                    }
+
+                    const appPreferences = await firestoreService.getAppSettings('app_preferences');
+                    setAppTheme(normalizeAppTheme(appPreferences?.theme));
 
                     // Fetch Invoice Count
                     const count = await firestoreService.getInvoiceCount();
@@ -110,27 +107,47 @@ const AdminSettings = ({ setActiveTab }) => {
         return () => clearInterval(timer);
     }, [isUnlocked]);
 
-    const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_SETTINGS_PASSWORD;
-
-    const handleSaveProfile = async () => {
+    const handleUnlock = async (e) => {
+        e.preventDefault();
         setIsProcessing(true);
         try {
-            await firestoreService.updateAppSettings('store_info', businessProfile);
-            showSuccess("Business Profile updated successfully!");
-        } catch (err) {
-            showError("Failed to update profile: " + err.message);
+            if (isLocalAuthMode()) {
+                const localUser = JSON.parse(localStorage.getItem('invoiceflow_user') || 'null');
+                if (!localUser || localUser.authProvider !== 'local') {
+                    throw new Error('Your login session has expired. Please sign in again.');
+                }
+                await authenticateLocalUser(localUser.username, password);
+            } else {
+                const [{ auth }, { EmailAuthProvider, reauthenticateWithCredential }] = await Promise.all([
+                    import('../firebase'),
+                    import('firebase/auth')
+                ]);
+                const currentUser = auth.currentUser;
+                if (!currentUser) throw new Error('Your login session has expired. Please sign in again.');
+
+                // The app uses one UID-bound users document as the source of truth.
+                // Do not rely on optional custom claims or a stale cached session
+                // when deciding whether the current account may open settings.
+                const profile = await firestoreService.getUserById(currentUser.uid)
+                    || await firestoreService.getUserByAuthUidField(currentUser.uid);
+                const role = sessionRole || profile?.role;
+                const isAdmin = role === 'admin' || role === 'dev_admin';
+                if (!isAdmin) throw new Error('Only an administrator can open these settings.');
+
+                if (!currentUser.email) throw new Error('This administrator account cannot be verified with a password.');
+                await reauthenticateWithCredential(
+                    currentUser,
+                    EmailAuthProvider.credential(currentUser.email, password)
+                );
+            }
+
+            setIsUnlocked(true);
+            setPassword('');
+            showSuccess("Admin Settings Unlocked");
+        } catch (error) {
+            showError(error.code === 'auth/invalid-credential' ? 'Incorrect login password.' : error.message);
         } finally {
             setIsProcessing(false);
-        }
-    };
-
-    const handleUnlock = (e) => {
-        e.preventDefault();
-        if (password === ADMIN_PASSWORD) {
-            setIsUnlocked(true);
-            showSuccess("Admin Settings Unlocked");
-        } else {
-            showError("Incorrect Password");
         }
     };
 
@@ -143,12 +160,12 @@ const AdminSettings = ({ setActiveTab }) => {
             const downloadAnchorNode = document.createElement('a');
             downloadAnchorNode.setAttribute("href", dataStr);
             const date = new Date().toISOString().split('T')[0];
-            downloadAnchorNode.setAttribute("download", `${business.appName}_Backup_${date}.json`);
+            const fileName = getCachedStoreName().replace(/[^a-z0-9]+/gi, '_');
+            downloadAnchorNode.setAttribute("download", `${fileName}_Backup_${date}.json`);
             document.body.appendChild(downloadAnchorNode);
             downloadAnchorNode.click();
             downloadAnchorNode.remove();
             showSuccess("Backup JSON Downloaded!");
-
         } catch (error) {
             showError("Backup Failed: " + error.message);
         } finally {
@@ -168,6 +185,33 @@ const AdminSettings = ({ setActiveTab }) => {
             showSuccess("Email recipient updated successfully!");
         } catch (err) {
             showError("Failed to save email settings: " + err.message);
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    const handleSaveInvoiceTemplate = async () => {
+        setIsProcessing(true);
+        try {
+            const savedSettings = cacheInvoiceTemplateSettings(invoiceTemplateSettings);
+            await firestoreService.updateAppSettings('invoice_template', savedSettings);
+            setInvoiceTemplateSettings(savedSettings);
+            showSuccess('Bill template and GST details saved successfully!');
+        } catch (err) {
+            showError('Failed to save bill template: ' + err.message);
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    const handleSaveAppTheme = async () => {
+        setIsProcessing(true);
+        try {
+            await firestoreService.updateAppSettings('app_preferences', { theme: normalizeAppTheme(appTheme) });
+            setAppTheme(normalizeAppTheme(appTheme));
+            showSuccess('Website theme updated successfully!');
+        } catch (err) {
+            showError('Failed to save website theme: ' + err.message);
         } finally {
             setIsProcessing(false);
         }
@@ -338,24 +382,68 @@ const AdminSettings = ({ setActiveTab }) => {
         }
     };
 
-    const ROLES = [
-        { id: 'admin', name: 'Admin', desc: 'Full Access' },
-        { id: 'manager', name: 'Manager', desc: 'Operational Access' },
-        { id: 'cashier', name: 'Cashier', desc: 'Billing Only' },
-        { id: 'waiter', name: 'Waiter', desc: 'Orders & Tables', type: 'restaurant' },
-        { id: 'kitchen', name: 'Kitchen', desc: 'KDS View Only', type: 'restaurant' }
-    ];
-
     const handleAddUser = async (e) => {
         e.preventDefault();
         try {
-            await firestoreService.addUser({
-                ...newUserForm,
-                id: editingUserId || newUserForm.username.trim().toLowerCase(),
-                createdAt: newUserForm.createdAt || new Date().toISOString()
-            });
+            if (editingUserId) {
+                if (isLocalAuthMode()) {
+                    const setup = getSetupConfig();
+                    const localUsers = (setup?.localUsers || []).map(user => user.id === editingUserId
+                        ? { ...user, username: newUserForm.username.trim().toLowerCase(), name: newUserForm.name.trim() }
+                        : user);
+                    const updatedSetup = { ...setup, localUsers };
+                    await persistSetupOnServer(updatedSetup);
+                    saveSetupConfig(updatedSetup);
+                }
+                await firestoreService.addUser({
+                    id: editingUserId,
+                    username: newUserForm.username.trim().toLowerCase(),
+                    name: newUserForm.name.trim(),
+                    role: 'staff',
+                    createdAt: newUserForm.createdAt || new Date().toISOString()
+                });
+            } else {
+                if (isLocalAuthMode()) {
+                    const username = newUserForm.username.trim().toLowerCase();
+                    const name = newUserForm.name.trim() || username;
+                    if (!username || !newUserForm.password || newUserForm.password.length < 8) {
+                        throw new Error('Enter a username and a staff password with at least 8 characters.');
+                    }
+                    const setup = getSetupConfig();
+                    const localUsers = setup?.localUsers || [];
+                    if (localUsers.some(user => user.username === username) || setup?.adminCredentials?.username === username) {
+                        throw new Error('That username is already in use.');
+                    }
+                    const localUser = {
+                        id: `local-${Date.now()}`,
+                        username,
+                        name,
+                        role: 'staff',
+                        credentials: await createAdminCredentials({ username, password: newUserForm.password, name }),
+                        createdAt: new Date().toISOString()
+                    };
+                    const updatedSetup = { ...setup, localUsers: [...localUsers, localUser] };
+                    await persistSetupOnServer(updatedSetup);
+                    saveSetupConfig(updatedSetup);
+                    await firestoreService.addUser({
+                        id: localUser.id,
+                        username: localUser.username,
+                        name: localUser.name,
+                        role: localUser.role,
+                        authProvider: 'local',
+                        createdAt: localUser.createdAt
+                    });
+                } else {
+                    const { createStaffUser } = await import('../services/userManagement');
+                    await createStaffUser({
+                        username: newUserForm.username,
+                        password: newUserForm.password,
+                        name: newUserForm.name
+                    });
+                }
+            }
             showSuccess(`User ${newUserForm.username} ${editingUserId ? 'updated' : 'added'}!`);
-            setNewUserForm({ username: '', name: '', role: 'staff', password: '', email: '' });
+            setNewUserForm({ username: '', name: '', role: 'staff', password: '' });
             setEditingUserId(null);
             setIsAddUserModalOpen(false);
             fetchUsers();
@@ -369,8 +457,7 @@ const AdminSettings = ({ setActiveTab }) => {
             username: user.username,
             name: user.name,
             role: user.role,
-            password: user.password || '',
-            email: user.email || '',
+            password: '',
             createdAt: user.createdAt
         });
         setEditingUserId(user.id);
@@ -378,12 +465,18 @@ const AdminSettings = ({ setActiveTab }) => {
     };
 
     const handleDeleteUser = async (id, role) => {
-        if (role === 'admin') {
+        if (role === 'admin' || role === 'dev_admin') {
             showError("Administrators cannot be removed here.");
             return;
         }
         if (!window.confirm("Revoke access for this user?")) return;
         try {
+            if (isLocalAuthMode()) {
+                const setup = getSetupConfig();
+                const updatedSetup = { ...setup, localUsers: (setup?.localUsers || []).filter(user => user.id !== id) };
+                await persistSetupOnServer(updatedSetup);
+                saveSetupConfig(updatedSetup);
+            }
             await firestoreService.deleteUser(id);
             showSuccess("User access revoked.");
             fetchUsers();
@@ -424,7 +517,7 @@ const AdminSettings = ({ setActiveTab }) => {
                             <Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
                             <input
                                 type="password"
-                                placeholder="Admin Password"
+                                placeholder="Administrator password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 className="w-full pl-10 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-primary/20 outline-none transition-all"
@@ -464,104 +557,141 @@ const AdminSettings = ({ setActiveTab }) => {
                 </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {/* Business Profile */}
-                <div className="card p-6 space-y-4 md:col-span-2" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                    <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                            <Store className="text-primary" size={20} />
-                            <h3 className="font-bold">Business Profile</h3>
-                        </div>
-                        <button
-                            onClick={handleSaveProfile}
-                            disabled={isProcessing}
-                            className="bg-primary text-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg shadow-primary/20 hover:opacity-90 transition-all"
-                        >
-                            {isProcessing ? 'Saving...' : 'Update Profile'}
-                        </button>
-                    </div>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-2">
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Business Name</label>
-                            <input 
-                                type="text" 
-                                value={businessProfile.shopName} 
-                                onChange={e => setBusinessProfile({...businessProfile, shopName: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Business Type</label>
-                            <select 
-                                value={businessProfile.businessType} 
-                                onChange={e => setBusinessProfile({...businessProfile, businessType: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            >
-                                <option value="restaurant">Restaurant / QSR</option>
-                                <option value="retail">General Retail</option>
-                                <option value="pharmacy">Pharmacy</option>
-                                <option value="grocery">Grocery Store</option>
-                            </select>
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">GSTIN</label>
-                            <input 
-                                type="text" 
-                                value={businessProfile.gstNumber} 
-                                onChange={e => setBusinessProfile({...businessProfile, gstNumber: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Currency</label>
-                            <input 
-                                type="text" 
-                                value={businessProfile.currency} 
-                                onChange={e => setBusinessProfile({...businessProfile, currency: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold text-center"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            />
-                        </div>
-                        <div className="md:col-span-2 space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Address</label>
-                            <input 
-                                type="text" 
-                                value={businessProfile.address} 
-                                onChange={e => setBusinessProfile({...businessProfile, address: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Phone</label>
-                            <input 
-                                type="text" 
-                                value={businessProfile.phone} 
-                                onChange={e => setBusinessProfile({...businessProfile, phone: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            />
-                        </div>
-                        <div className="space-y-1">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Timezone</label>
-                            <select 
-                                value={businessProfile.timezone} 
-                                onChange={e => setBusinessProfile({...businessProfile, timezone: e.target.value})}
-                                className="w-full p-2.5 rounded-xl border border-border bg-background text-xs font-semibold"
-                                style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                            >
-                                <option value="Asia/Kolkata">IST (UTC+5:30)</option>
-                                <option value="UTC">UTC</option>
-                                <option value="America/New_York">EST (UTC-5:00)</option>
-                            </select>
-                        </div>
-                    </div>
+            <div className="card p-6 space-y-4" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                <div>
+                    <h3 className="font-bold text-lg">Website Theme</h3>
+                    <p className="text-xs text-gray-500 mt-1">Only administrators can change the theme used by every signed-in user.</p>
                 </div>
+                <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                    <label className="flex-1 text-xs font-bold uppercase text-gray-500">
+                        Application theme
+                        <select
+                            value={appTheme}
+                            onChange={(e) => setAppTheme(e.target.value)}
+                            className="mt-1 w-full p-3 border rounded-xl text-sm font-semibold normal-case"
+                            style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
+                        >
+                            <option value="emerald">Green / Emerald</option>
+                            <option value="blue">Blue / Corporate</option>
+                            <option value="dark">Black / Midnight</option>
+                        </select>
+                    </label>
+                    <button onClick={handleSaveAppTheme} disabled={isProcessing} className="px-5 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-50">
+                        {isProcessing ? 'Saving...' : 'Save Website Theme'}
+                    </button>
+                </div>
+            </div>
 
+            <div className="card p-6 space-y-4" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                <div>
+                    <h3 className="font-bold text-lg">Bill Template & GST Details</h3>
+                    <p className="text-xs text-gray-500 mt-1">Choose the invoice layout and seller details printed on A4 bills.</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Bill template
+                        <select
+                            value={invoiceTemplateSettings.template}
+                            onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, template: e.target.value })}
+                            className="mt-1 w-full p-3 border rounded-xl text-sm font-semibold normal-case"
+                            style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
+                        >
+                            <option value="classic">Classic Invoice</option>
+                            <option value="retail">Retail GST Invoice (attached layout)</option>
+                        </select>
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Invoice title
+                        <input value={invoiceTemplateSettings.invoiceTitle} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, invoiceTitle: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="flex items-center justify-between gap-4 p-3 border rounded-xl text-xs font-bold uppercase text-gray-500">
+                        <span>
+                            Thermal printer
+                            <span className="block mt-1 text-[10px] font-medium normal-case text-gray-400">Show and print thermal receipts from bill history</span>
+                        </span>
+                        <input
+                            type="checkbox"
+                            checked={invoiceTemplateSettings.thermalPrinterEnabled === true}
+                            onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, thermalPrinterEnabled: e.target.checked })}
+                            className="h-5 w-5 accent-primary"
+                        />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Dispatch document no.
+                        <input value={invoiceTemplateSettings.dispatchDocumentNo} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, dispatchDocumentNo: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Dispatched through
+                        <input value={invoiceTemplateSettings.dispatchedThrough} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, dispatchedThrough: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Destination
+                        <input value={invoiceTemplateSettings.destination} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, destination: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Terms of delivery
+                        <input value={invoiceTemplateSettings.termsOfDelivery} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, termsOfDelivery: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Seller / business name
+                        <input value={invoiceTemplateSettings.sellerName} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerName: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        GSTIN
+                        <input value={invoiceTemplateSettings.sellerGstin} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerGstin: e.target.value.toUpperCase() })} placeholder="e.g. 05ABCDE1234F1Z5" className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500 md:col-span-2">
+                        Seller address
+                        <input value={invoiceTemplateSettings.sellerAddress} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerAddress: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Phone
+                        <input value={invoiceTemplateSettings.sellerPhone} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerPhone: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Email
+                        <input type="email" value={invoiceTemplateSettings.sellerEmail} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerEmail: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        State
+                        <input value={invoiceTemplateSettings.sellerState} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerState: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        State code
+                        <input value={invoiceTemplateSettings.sellerStateCode} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerStateCode: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        License / seed number
+                        <input value={invoiceTemplateSettings.sellerLicenseNo} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, sellerLicenseNo: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <div className="md:col-span-2 pt-2 border-t text-xs font-bold uppercase tracking-wide text-gray-500" style={{ borderColor: 'var(--border)' }}>Payment details printed inside the bill</div>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Bank name
+                        <input value={invoiceTemplateSettings.paymentBankName} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, paymentBankName: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Account name
+                        <input value={invoiceTemplateSettings.paymentAccountName} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, paymentAccountName: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        Account number
+                        <input value={invoiceTemplateSettings.paymentAccountNumber} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, paymentAccountNumber: e.target.value })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500">
+                        IFSC code
+                        <input value={invoiceTemplateSettings.paymentIfscCode} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, paymentIfscCode: e.target.value.toUpperCase() })} className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <label className="text-xs font-bold uppercase text-gray-500 md:col-span-2">
+                        UPI ID
+                        <input value={invoiceTemplateSettings.paymentUpiId} onChange={(e) => setInvoiceTemplateSettings({ ...invoiceTemplateSettings, paymentUpiId: e.target.value })} placeholder="example@upi" className="mt-1 w-full p-3 border rounded-xl text-sm normal-case" style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }} />
+                    </label>
+                    <button onClick={handleSaveInvoiceTemplate} disabled={isProcessing} className="md:col-span-2 px-5 py-3 rounded-xl bg-primary text-white text-sm font-bold disabled:opacity-50">
+                        {isProcessing ? 'Saving...' : 'Save Bill Template & GST Details'}
+                    </button>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* Backup & Restore */}
                 <div className="card p-6 space-y-4" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                     <div className="flex items-center gap-3 mb-2">
@@ -600,9 +730,12 @@ const AdminSettings = ({ setActiveTab }) => {
                                     setIsProcessing(true);
                                     setProcessStatus("Uploading to Google Drive...");
                                     try {
-                                        if (!auth.currentUser) {
-                                            showError("Firebase Session not ready. Please wait a moment or re-login.");
-                                            return;
+                                        if (getSetupConfig()?.database?.type === 'firebase') {
+                                            const { auth } = await import('../firebase');
+                                            if (!auth.currentUser) {
+                                                showError("Firebase Session not ready. Please wait a moment or re-login.");
+                                                return;
+                                            }
                                         }
                                         const { GoogleDrivePlugin } = await import('../plugins/google_drive.plugin');
                                         const sessionToken = JSON.parse(localStorage.getItem('invoiceflow_user'))?.googleAccessToken;
@@ -698,20 +831,20 @@ const AdminSettings = ({ setActiveTab }) => {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
                         <div className="p-4 rounded-xl border border-border bg-background">
                             <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-2">Next Invoice ID</label>
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm font-bold text-primary bg-primary/10 px-3 py-2 rounded-lg">INV-{(invoiceCount + 1).toString().padStart(4, '0')}</span>
-                                <div className="flex-1 flex gap-2">
+                            <div className="flex flex-col sm:flex-row sm:items-center gap-3 min-w-0">
+                                <span className="w-fit text-sm font-bold text-primary bg-primary/10 px-3 py-2 rounded-lg">INV-{(invoiceCount + 1).toString().padStart(4, '0')}</span>
+                                <div className="w-full min-w-0 flex flex-col sm:flex-row gap-2">
                                     <input
                                         type="number"
                                         value={manualInvoiceCount}
                                         onChange={(e) => setManualInvoiceCount(e.target.value)}
-                                        className="w-full p-2 rounded-lg border border-border text-xs ring-0 outline-none focus:border-primary"
+                                        className="w-full min-w-0 p-2 rounded-lg border border-border text-xs ring-0 outline-none focus:border-primary"
                                         style={{ background: 'var(--surface)', color: 'var(--text-main)' }}
                                         placeholder="Set Counter"
                                     />
                                     <button
                                         onClick={handleUpdateInvoiceCount}
-                                        className="bg-primary text-white p-2 px-3 rounded-lg text-[10px] font-bold hover:opacity-90 transition-all shadow-sm"
+                                        className="w-full sm:w-auto bg-primary text-white p-2 px-3 rounded-lg text-[10px] font-bold hover:opacity-90 transition-all shadow-sm whitespace-nowrap"
                                     >
                                         Update
                                     </button>
@@ -814,7 +947,7 @@ const AdminSettings = ({ setActiveTab }) => {
                     <button
                         onClick={() => {
                             setEditingUserId(null);
-                            setNewUserForm({ username: '', name: '', role: 'staff', password: '', email: '' });
+                            setNewUserForm({ username: '', name: '', role: 'staff', password: '' });
                             setIsAddUserModalOpen(true);
                         }}
                         className="flex items-center gap-2 bg-primary text-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg shadow-primary/20 hover:opacity-90 active:scale-[0.98] transition-all"
@@ -847,13 +980,15 @@ const AdminSettings = ({ setActiveTab }) => {
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button
-                                        onClick={() => openEditModal(user)}
-                                        className="p-2 text-gray-400 hover:text-primary hover:bg-primary/5 rounded-lg transition-all"
-                                    >
-                                        <Edit size={16} />
-                                    </button>
-                                    {user.role !== 'admin' && (
+                                    {user.role !== 'admin' && user.role !== 'dev_admin' && (
+                                        <button
+                                            onClick={() => openEditModal(user)}
+                                            className="p-2 text-gray-400 hover:text-primary hover:bg-primary/5 rounded-lg transition-all"
+                                        >
+                                            <Edit size={16} />
+                                        </button>
+                                    )}
+                                    {user.role !== 'admin' && user.role !== 'dev_admin' && (
                                         <button
                                             onClick={() => handleDeleteUser(user.id, user.role)}
                                             className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
@@ -993,7 +1128,7 @@ const AdminSettings = ({ setActiveTab }) => {
                                                                 <p className="text-[10px] opacity-60">
                                                                     {coupon.type === 'percentage' ? `${coupon.value}%` :
                                                                         coupon.type === 'atCost' ? 'At-Cost (No Profit)' :
-                                                                            `${business.currency}${coupon.value}`} off (Min: ${business.currency}${coupon.minBill})
+                                                                            `Rs.${coupon.value}`} off (Min: Rs.${coupon.minBill})
                                                                 </p>
                                                             </div>
                                                             <button
@@ -1018,7 +1153,7 @@ const AdminSettings = ({ setActiveTab }) => {
                                                             if (type !== 'atCost') {
                                                                 val = parseFloat(prompt("Discount Value", "10"));
                                                             }
-                                                            const min = parseFloat(prompt(`Minimum Bill Amount (${business.currency})`, "0"));
+                                                            const min = parseFloat(prompt("Minimum Bill Amount (Rs.)", "0"));
 
                                                             managingPlugin.settings.coupons = [
                                                                 ...(value || []),
@@ -1099,6 +1234,12 @@ const AdminSettings = ({ setActiveTab }) => {
                                                         </button>
                                                     )}
                                                 </div>
+                                                <p className="text-[10px] text-gray-500">
+                                                    Last backup:{' '}
+                                                    {managingPlugin.settings.lastBackup
+                                                        ? new Date(managingPlugin.settings.lastBackup).toLocaleString('en-IN')
+                                                        : 'Never'}
+                                                </p>
                                                 {managingPlugin.settings.tokenExpiry && (
                                                     <div className="flex flex-col gap-2 pt-2">
                                                         <p className="text-[9px] text-gray-400 pl-1">
@@ -1228,55 +1369,27 @@ const AdminSettings = ({ setActiveTab }) => {
                                             onChange={(e) => setNewUserForm({ ...newUserForm, username: e.target.value })}
                                             className="w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-primary/20 outline-none"
                                             style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                                            required
+                                            required={!editingUserId}
                                             disabled={!!editingUserId}
                                         />
                                     </div>
                                     <div className="space-y-2">
                                         <label className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Password (Login)</label>
                                         <input
-                                            type="text"
+                                            type="password"
                                             placeholder="••••••••"
                                             value={newUserForm.password}
                                             onChange={(e) => setNewUserForm({ ...newUserForm, password: e.target.value })}
                                             className="w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-primary/20 outline-none"
                                             style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                                            required
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Role</label>
-                                        <select
-                                            value={newUserForm.role}
-                                            onChange={(e) => setNewUserForm({ ...newUserForm, role: e.target.value })}
-                                            className="w-full p-3 border rounded-xl text-sm font-bold focus:ring-2 focus:ring-primary/20 outline-none"
-                                            style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
-                                            required
-                                        >
-                                            {ROLES.filter(r => !r.type || r.type === business.businessMode).map(role => (
-                                                <option key={role.id} value={role.id}>{role.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Google Email (Optional)</label>
-                                        <input
-                                            type="email"
-                                            placeholder="user@gmail.com"
-                                            value={newUserForm.email}
-                                            onChange={(e) => setNewUserForm({ ...newUserForm, email: e.target.value })}
-                                            className="w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-primary/20 outline-none"
-                                            style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
+                                            required={!editingUserId}
                                         />
                                     </div>
                                 </div>
 
                                 <div className="p-4 bg-orange-50/10 border border-orange-100 rounded-xl text-[10px] text-orange-600 leading-relaxed">
                                     <p className="font-bold mb-1">NOTE ON LOGIN ACCESS</p>
-                                    <p>Adding a staff profile here creates their record. <b>They must also be added manually to Firebase Authentication</b> with the email <code>username@manas0x.site</code> and the password specified above to be able to log in.</p>
+                                    <p>New staff accounts use the username for login. Passwords are never stored in Firestore. Editing a profile does not change its login password.</p>
                                 </div>
                             </div>
 

@@ -1,17 +1,15 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { Plus, Trash2, Search, User, Receipt, Download, Smartphone, Copy, MapPin, X, History as HistoryIcon, Pencil, Calendar, ArrowUp, ArrowDown, Printer, Share2, MessageCircle, ChefHat, Award } from 'lucide-react'
-import { generateInvoicePDF, generateThermalInvoicePDF } from '../utils/pdfGenerator'
+import { Plus, Trash2, Search, User, Receipt, Download, Smartphone, MapPin, X, History as HistoryIcon, Pencil, Calendar, ArrowUp, ArrowDown, Printer, Share2, MessageCircle } from 'lucide-react'
+import { generateInvoicePDF, generateThermalInvoicePDF, createInvoicePDFBlob } from '../utils/pdfGenerator'
 import { firestoreService } from '../services/firestoreService'
-import { getDoc, doc } from 'firebase/firestore'
-import { db } from '../firebase'
 import { showError, showSuccess, showConfirm } from '../utils/alert'
 import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts'
 import { pluginLoader } from '../pluginLoader'
-
-import { useBusiness } from '../context/BusinessContext';
+import { getCachedStoreName } from '../config/storeConfig'
+import { getInvoiceTemplateSettings } from '../config/invoiceTemplateConfig'
 
 const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
-    const business = useBusiness();
+    const thermalPrinterEnabled = getInvoiceTemplateSettings().thermalPrinterEnabled === true
     const [products, setProducts] = useState([])
     const [customers, setCustomers] = useState([])
     const [loading, setLoading] = useState(true)
@@ -42,57 +40,6 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         setIsHistoryView(initialHistory)
     }, [initialHistory])
 
-    // Handle Duplicate Invoice Loading
-    useEffect(() => {
-        const checkPendingDuplicate = () => {
-            const pendingData = localStorage.getItem('billing_pending_duplicate');
-            if (pendingData) {
-                try {
-                    const parsed = JSON.parse(pendingData);
-                    localStorage.removeItem('billing_pending_duplicate');
-
-                    setInvoice(prev => ({
-                        ...prev,
-                        date: new Date().toISOString().split('T')[0],
-                        customerName: parsed.customerName || '',
-                        customerPhone: parsed.customerPhone || '',
-                        customerAddress: parsed.customerAddress || '',
-                        items: (parsed.items || []).map(i => ({
-                            ...i,
-                            internalId: Date.now() + Math.random() // Regenerate IDs to prevent conflicts
-                        })),
-                        discount: 0,
-                        paymentMode: 'Cash'
-                    }));
-
-                    showSuccess("Invoice duplicated successfully!");
-                } catch (e) {
-                    console.error("Error loading duplicate invoice", e);
-                }
-            }
-        };
-
-        // Check on mount (for cross-tab duplication)
-        checkPendingDuplicate();
-
-        // Check when switching back to New Bill view (for same-tab duplication)
-        if (!isHistoryView) {
-            checkPendingDuplicate();
-        }
-    }, [isHistoryView]);
-
-    const handleDuplicateInvoice = (inv) => {
-        const data = {
-            customerName: inv.customerName,
-            customerPhone: inv.customerPhone,
-            customerAddress: inv.customerAddress,
-            items: inv.items
-        };
-        localStorage.setItem('billing_pending_duplicate', JSON.stringify(data));
-
-        setActiveTab('billing');
-        setIsHistoryView(false);
-    }
     const [invoice, setInvoice] = useState({
         date: new Date().toISOString().split('T')[0],
         customerName: '',
@@ -102,8 +49,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         discount: 0,
         paymentMode: 'Cash',
         couponCode: '',
-        appliedCoupon: null,
-        tableId: ''
+        appliedCoupon: null
     })
     const [couponError, setCouponError] = useState(null)
     const [editingInvoice, setEditingInvoice] = useState(null)
@@ -201,23 +147,35 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         setTimeout(() => document.getElementById('billing-search')?.focus(), 0)
     }
 
+    const findCustomerForInvoice = (inv) => {
+        const invoicePhone = (inv?.customerPhone || '').replace(/\D/g, '')
+        const invoiceName = (inv?.customerName || '').trim().toLowerCase()
+        return customers.find(customer => {
+            const customerPhone = (customer.phone || '').replace(/\D/g, '')
+            const customerName = (customer.name || '').trim().toLowerCase()
+            return Boolean(
+                (invoicePhone && customerPhone && invoicePhone === customerPhone) ||
+                (invoiceName && customerName && invoiceName === customerName)
+            )
+        })
+    }
+
+    const hydrateInvoiceCustomer = (inv) => {
+        const customer = findCustomerForInvoice(inv)
+        if (!customer) return inv
+        return {
+            ...inv,
+            customerPhone: customer.phone || inv.customerPhone || '',
+            customerAddress: customer.address || inv.customerAddress || ''
+        }
+    }
+
     const handleSearch = (val) => {
         setSearchTerm(val)
         if (val.length > 1) {
-            // Check for exact Barcode match first (for scanning)
-            const barcodeMatch = products.find(p => p.barcode === val.trim())
-            if (barcodeMatch) {
-                addItem(barcodeMatch)
-                setSearchTerm('')
-                setSearchResults([])
-                return
-            }
-
             const filtered = products.filter(p =>
                 (p.name || '').toLowerCase().includes(val.toLowerCase()) ||
-                (p.category || '').toLowerCase().includes(val.toLowerCase()) ||
-                (p.barcode || '').includes(val) ||
-                (p.batchNumber || '').toLowerCase().includes(val.toLowerCase())
+                (p.category || '').toLowerCase().includes(val.toLowerCase())
             )
             setSearchResults(filtered)
         } else {
@@ -322,7 +280,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                         };
                     } else {
                         // Switch back to Bag
-                        const cleanName = item.name.replace(' (Loose)', '').replace(/\s*\(\d+(\.\d+)?\s*kg\s*@\s*{business.currency}\d+(\.\d+)?\/kg\)/g, '');
+                        const cleanName = item.name.replace(' (Loose)', '').replace(/\s*\(\d+(\.\d+)?\s*kg\s*@\s*Rs.\d+(\.\d+)?\/kg\)/g, '');
                         return {
                             ...item,
                             salesType: 'Bag',
@@ -409,7 +367,9 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         return totalDisc;
     })();
 
-    const finalTotal = totals.total - invoice.discount - pluginDiscount;
+    const manualDiscount = Math.max(0, Number(invoice.discount) || 0)
+    const totalDiscount = manualDiscount + pluginDiscount
+    const finalTotal = Math.max(0, totals.total - totalDiscount)
 
     const handleApplyCoupon = () => {
         if (!pluginLoader.isEnabled('discount')) return;
@@ -427,53 +387,16 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         }
     };
 
-    const sendToKitchen = async () => {
-        if (!invoice.items.length) {
-            showError("Add some items first");
-            return;
-        }
-        if (business.businessMode === 'restaurant' && !invoice.tableId) {
-            showError("Please select a Table Number");
-            return;
-        }
-
-        setIsSaving(true);
-        try {
-            const orderData = {
-                items: invoice.items.map(item => ({
-                    id: item.id,
-                    name: item.name,
-                    qty: item.quantity,
-                    price: item.price,
-                    total: item.price * item.quantity
-                })),
-                totalAmount: finalTotal,
-                status: 'pending',
-                type: 'table_order',
-                tableId: invoice.tableId,
-                customerName: invoice.customerName || 'Guest',
-                customerPhone: invoice.customerPhone || '',
-                source: 'pos_counter',
-                date: new Date().toISOString()
-            };
-
-            await addDoc(collection(db, 'shop_orders'), orderData);
-            showSuccess("Order sent to Kitchen!");
-            
-            // Optional: reset form or keep for settlement later? 
-            // Usually we reset for next customer
-            cancelEdit();
-        } catch (err) {
-            showError("Failed to send: " + err.message);
-        } finally {
-            setIsSaving(false);
-        }
-    };
-
     const saveInvoice = async () => {
         if (!invoice.customerName || invoice.items.length === 0) {
             showError("Incomplete invoice details")
             return
+        }
+
+        const todayStr = new Date().toISOString().split('T')[0];
+        if (invoice.date > todayStr) {
+            showError("Future date is not allowed! You can only generate bills for today or past dates.");
+            return;
         }
 
         if (isSaving) return;
@@ -557,8 +480,9 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
 
             // 2. Prepare Invoice Data for RECORDING (Keep Original Units like Kg)
             // This ensures the PDF and History show exactly what the user entered (e.g. 5 Kg @ 20/kg)
+            const invoiceForSave = hydrateInvoiceCustomer(invoice)
             const invoiceData = {
-                ...invoice,
+                ...invoiceForSave,
                 items: invoice.items.map(item => {
                     if (item.salesType === 'Loose') {
                         // Clean existing suffixes to prevent duplication like "... (2kg @ 10)(2kg @ 10)"
@@ -569,7 +493,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
 
                         return {
                             ...item,
-                            name: `${baseName} (Loose) (${item.quantity} kg @ {business.currency} ${item.price}/kg)`
+                            name: `${baseName} (Loose) (${item.quantity} kg @ Rs. ${item.price}/kg)`
                         };
                     }
                     return item;
@@ -587,11 +511,17 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                 })()
             };
 
+            // Keep the original bill number when editing. SQL uses the bill
+            // number as its storage key, while Firebase also has docId.
+            if (editingInvoice?.id) invoiceData.id = editingInvoice.id;
+
             let savedId;
             if (editingInvoice) {
                 // Update Existing Invoice
-                await firestoreService.updateInvoice(editingInvoice.docId, invoiceData)
-                savedId = editingInvoice.id
+                const invoiceStorageId = editingInvoice.docId || editingInvoice.id;
+                if (!invoiceStorageId) throw new Error('This bill cannot be edited because its identifier is missing.');
+                await firestoreService.updateInvoice(invoiceStorageId, invoiceData)
+                savedId = editingInvoice.id || invoiceStorageId
                 // Ensure ID is passed to PDF
                 invoiceData.id = savedId;
                 showSuccess(`Invoice Updated!`)
@@ -600,7 +530,9 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                 savedId = await firestoreService.addInvoice(invoiceData)
                 // Add ID to data for PDF
                 invoiceData.id = savedId;
-                showSuccess(`{business.getTerm('orders').slice(0, -1)} Saved!`);
+                showSuccess(String(savedId).startsWith('OFFLINE-')
+                    ? 'Invoice saved offline. It will sync when internet returns.'
+                    : 'Invoice Saved!');
 
                 // Send HTML Email Notification via Brevo
                 firestoreService.sendNewBillEmail(invoiceData).catch(err => {
@@ -611,7 +543,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                 if (isStaff) {
                     firestoreService.addNotification({
                         title: "New Invoice Generated",
-                        message: `Staff generated invoice #${savedId} for ${invoiceData.customerName} ({business.currency} ${invoiceData.totalAmount.toFixed(2)})`,
+                        message: `Staff generated invoice #${savedId} for ${invoiceData.customerName} (Rs. ${invoiceData.totalAmount.toFixed(2)})`,
                         type: "invoice",
                         details: {
                             invoiceId: savedId,
@@ -656,45 +588,79 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
         }
     }
 
-    const shareToWhatsApp = (inv) => {
-        if (!inv.customerPhone) {
+    const shareToWhatsApp = async (inv) => {
+        const invoiceWithCustomer = hydrateInvoiceCustomer(inv)
+        if (!invoiceWithCustomer.customerPhone) {
             showError("Customer phone number is required to share via WhatsApp!");
             return;
         }
 
-        const itemsText = inv.items.map(item =>
-            `• ${item.name}: ${item.quantity} ${item.unit} @ {business.currency} ${item.price} = {business.currency} ${(item.quantity * item.price).toFixed(2)}`
+        const itemsText = invoiceWithCustomer.items.map(item =>
+            `• ${item.name}: ${item.quantity} ${item.unit} @ Rs. ${item.price} = Rs. ${(item.quantity * item.price).toFixed(2)}`
         ).join('\n');
 
-        const message = `*${business.appName.toUpperCase()}*\n` +
+        const message = `*${getCachedStoreName()}*\n` +
             `--------------------------\n` +
-            `*Bill No:* ${inv.id || 'N/A'}\n` +
-            `*Date:* ${new Date(inv.date).toLocaleDateString('en-GB')}\n` +
-            `*Customer:* ${inv.customerName}\n` +
+            `*Bill No:* ${invoiceWithCustomer.id || 'N/A'}\n` +
+            `*Date:* ${new Date(invoiceWithCustomer.date).toLocaleDateString('en-GB')}\n` +
+            `*Customer:* ${invoiceWithCustomer.customerName}\n` +
+            (invoiceWithCustomer.customerAddress ? `*Address:* ${invoiceWithCustomer.customerAddress}\n` : '') +
             `--------------------------\n` +
             `*Items:*\n${itemsText}\n` +
             `--------------------------\n` +
-            `*Total Amount:* {business.currency} ${inv.totalAmount.toFixed(2)}\n` +
+            (Number(invoiceWithCustomer.discount) > 0 ? `*Discount:* -Rs. ${Number(invoiceWithCustomer.discount).toFixed(2)}\n` : '') +
+            `*Total Amount:* Rs. ${Number(invoiceWithCustomer.totalAmount || 0).toFixed(2)}\n` +
+            `*Payment:* ${invoiceWithCustomer.paymentMode || 'Cash'}\n` +
             `--------------------------\n` +
             `Thank you for your business! 🙏`;
 
         const encodedMessage = encodeURIComponent(message);
-        const phone = inv.customerPhone.replace(/[^0-9]/g, '');
-        // Prefix with 91 if it's a 10-digit number
-        const formattedPhone = phone.length === 10 ? `91${phone}` : phone;
+        const phone = String(invoiceWithCustomer.customerPhone).replace(/\D/g, '');
+        // WhatsApp expects an international number without + or spaces.
+        const formattedPhone = phone.length === 10
+            ? `91${phone}`
+            : phone.length === 11 && phone.startsWith('0')
+                ? `91${phone.slice(1)}`
+                : phone;
 
+        try {
+            const pdfBlob = await createInvoicePDFBlob(invoiceWithCustomer)
+            const pdfFile = new File([pdfBlob], `Invoice-${invoiceWithCustomer.id || 'receipt'}.pdf`, { type: 'application/pdf' })
+            const canSharePdf = typeof navigator.share === 'function' &&
+                typeof navigator.canShare === 'function' &&
+                navigator.canShare({ files: [pdfFile] })
+
+            if (canSharePdf) {
+                await navigator.share({
+                    title: `Invoice ${invoiceWithCustomer.id || ''}`.trim(),
+                    text: message,
+                    files: [pdfFile]
+                })
+                return
+            }
+        } catch (error) {
+            // Closing the share sheet is user cancellation, not a failure.
+            if (error?.name !== 'AbortError') console.warn('PDF sharing unavailable:', error)
+        }
+
+        // Desktop browsers cannot attach a local file through wa.me. They get
+        // the complete formatted message instead.
         window.open(`https://wa.me/${formattedPhone}?text=${encodedMessage}`, '_blank');
     };
 
     const handleEdit = (inv) => {
         setEditingInvoice(inv)
+        const todayStr = new Date().toISOString().split('T')[0];
+        const rawDate = inv.date ? new Date(inv.date).toISOString().split('T')[0] : todayStr;
+        const validDate = rawDate > todayStr ? todayStr : rawDate;
+        const invoiceWithCustomer = hydrateInvoiceCustomer(inv)
         setInvoice({
-            // Ensure date is formatted YYYY-MM-DD for the input
-            date: inv.date ? new Date(inv.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
-            customerName: inv.customerName || '',
-            customerPhone: inv.customerPhone || '',
-            customerAddress: inv.customerAddress || '',
-            items: (inv.items || []).map(item => {
+            // Ensure date is formatted YYYY-MM-DD for the input and not in future
+            date: validDate,
+            customerName: invoiceWithCustomer.customerName || '',
+            customerPhone: invoiceWithCustomer.customerPhone || '',
+            customerAddress: invoiceWithCustomer.customerAddress || '',
+            items: (invoiceWithCustomer.items || []).map(item => {
                 // Recover Loose state if lost but name indicates it
                 let outputItem = { ...item };
 
@@ -719,8 +685,8 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
 
                 return outputItem;
             }),
-            discount: inv.discount || 0,
-            paymentMode: inv.paymentMode || 'Cash'
+            discount: invoiceWithCustomer.discount || 0,
+            paymentMode: invoiceWithCustomer.paymentMode || 'Cash'
         })
         setIsHistoryView(false)
     }
@@ -823,7 +789,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                         boxShadow: !isHistoryView ? '0 10px 15px -3px rgba(var(--primary-rgb), 0.2)' : 'none'
                     }}
                 >
-                    <Plus size={18} /> New {business.getTerm('orders').slice(0, -1)}
+                    <Plus size={18} /> New Bill
                 </button>
                 <button
                     onClick={() => {
@@ -856,32 +822,26 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                 <h3 className="text-lg font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
                                     <User size={20} style={{ color: 'var(--primary)' }} /> Customer Details
                                 </h3>
-                                <div className="flex items-center gap-2">
-                                    {business.businessMode === 'restaurant' && (
-                                        <div className="border rounded-lg flex items-center px-3 py-1 gap-2 transition-all" style={{ background: 'var(--background)', borderColor: 'var(--border)' }}>
-                                            <span className="text-[10px] font-bold text-muted uppercase">Table #</span>
-                                            <input
-                                                type="text"
-                                                placeholder="e.g. 5"
-                                                className="bg-transparent border-none p-0 text-sm font-black focus:ring-0 w-12 outline-none text-center"
-                                                style={{ color: 'var(--primary)' }}
-                                                value={invoice.tableId}
-                                                onChange={e => setInvoice({ ...invoice, tableId: e.target.value })}
-                                            />
-                                        </div>
-                                    )}
-                                    <div className="border rounded-lg flex items-center px-3 py-1 gap-2 transition-all" style={{ background: 'var(--background)', borderColor: 'var(--border)' }}>
-                                        <Calendar size={16} style={{ color: 'var(--text-muted)' }} />
-                                        <input
-                                            type="date"
-                                            className="bg-transparent border-none p-0 text-sm font-bold focus:ring-0 w-32 outline-none"
-                                            style={{ color: 'var(--text-main)' }}
-                                            value={invoice.date}
-                                            onChange={e => setInvoice({ ...invoice, date: e.target.value })}
-                                            min={SOFTWARE_START_DATE}
-                                            max={new Date().toISOString().split('T')[0]}
-                                        />
-                                    </div>
+                                <div className="border rounded-lg flex items-center px-3 py-1 gap-2 transition-all" style={{ background: 'var(--background)', borderColor: 'var(--border)' }}>
+                                    <Calendar size={16} style={{ color: 'var(--text-muted)' }} />
+                                    <input
+                                        type="date"
+                                        className="bg-transparent border-none p-0 text-sm font-bold focus:ring-0 w-32 outline-none"
+                                        style={{ color: 'var(--text-main)' }}
+                                        value={invoice.date}
+                                        onChange={e => {
+                                            const selectedDate = e.target.value;
+                                            const todayStr = new Date().toISOString().split('T')[0];
+                                            if (selectedDate && selectedDate > todayStr) {
+                                                showError("Future date is not allowed for generating bills.");
+                                                setInvoice({ ...invoice, date: todayStr });
+                                            } else {
+                                                setInvoice({ ...invoice, date: selectedDate });
+                                            }
+                                        }}
+                                        min={SOFTWARE_START_DATE}
+                                        max={new Date().toISOString().split('T')[0]}
+                                    />
                                 </div>
                             </div>
                             <div className="relative">
@@ -924,7 +884,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
 
                         {/* Product Search & Table */}
                         <div className="card p-5 shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                            <h3 className="text-lg font-bold mb-5" style={{ color: 'var(--text-main)' }}>{business.getTerm('products')}</h3>
+                            <h3 className="text-lg font-bold mb-5" style={{ color: 'var(--text-main)' }}>Billing Items</h3>
                             <div className="relative mb-6">
                                 <Search className="absolute left-3.5 top-1/2 -translate-y-1/2" size={18} style={{ color: 'var(--text-muted)' }} />
                                 <input
@@ -956,7 +916,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                                 const kg = remainder * weight;
                                                                 return (
                                                                     <span>
-                                                                        Stock: {bags} Bags
+                                                                        Stock: {bags} Units
                                                                         {kg > 0.01 && <span className="ml-1">({kg.toFixed(2).replace(/\.?0+$/, '')} Kg)</span>} remaining
                                                                     </span>
                                                                 );
@@ -967,7 +927,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                     </div>
                                                 </div>
                                                 <div className="text-right shrink-0">
-                                                    {!isStaff && <div className="font-extrabold" style={{ color: 'var(--text-main)' }}>{business.currency} {p.purchasePrice}</div>}
+                                                    {!isStaff && <div className="font-extrabold" style={{ color: 'var(--text-main)' }}>Rs. {p.purchasePrice}</div>}
                                                     <div className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-full inline-block mt-1" style={{ background: 'rgba(var(--primary-rgb), 0.1)', color: 'var(--primary)' }}>Select</div>
                                                 </div>
                                             </div>
@@ -980,7 +940,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                 <table className="w-full min-w-[550px] border-collapse">
                                     <thead>
                                         <tr className="text-left border-b" style={{ borderColor: 'var(--border)', background: 'var(--background)' }}>
-                                            <th className="px-4 py-3 text-xs font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>{business.getTerm('billing')} Details</th>
+                                            <th className="px-4 py-3 text-xs font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>Item Details</th>
                                             <th className="px-4 py-3 text-xs font-bold uppercase tracking-widest w-28" style={{ color: 'var(--text-muted)' }}>Inc Price</th>
                                             <th className="px-4 py-3 text-xs font-bold uppercase tracking-widest w-24" style={{ color: 'var(--text-muted)' }}>Qty</th>
                                             <th className="px-4 py-3 text-xs font-bold uppercase tracking-widest text-right" style={{ color: 'var(--text-muted)' }}>Total</th>
@@ -1001,14 +961,14 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                                     className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-all`}
                                                                     style={item.salesType !== 'Loose' ? { background: 'var(--surface)', color: 'var(--success)', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' } : { color: 'var(--text-muted)' }}
                                                                 >
-                                                                    Bag
+                                                                    Pack
                                                                 </button>
                                                                 <button
                                                                     onClick={() => item.salesType !== 'Loose' && toggleSalesType(item.internalId || item.id)}
                                                                     className={`px-2 py-0.5 text-[10px] font-bold rounded-md transition-all`}
                                                                     style={item.salesType === 'Loose' ? { background: 'var(--surface)', color: 'var(--success)', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' } : { color: 'var(--text-muted)' }}
                                                                 >
-                                                                    Loose
+                                                                    Bulk
                                                                 </button>
                                                             </div>
                                                         )}
@@ -1016,7 +976,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                 </td>
                                                 <td className="px-4 py-4">
                                                     <div className="relative">
-                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>{business.currency}</span>
+                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>Rs.</span>
                                                         <input
                                                             className="w-full pl-9 pr-2 py-2 border rounded-lg text-sm font-bold focus:ring-1 shadow-sm"
                                                             type="number"
@@ -1046,7 +1006,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                     </div>
                                                 </td>
                                                 <td className="px-4 py-4 text-right">
-                                                    <div className="font-extrabold" style={{ color: 'var(--text-main)' }}>{business.currency} {(item.price * item.quantity).toFixed(2)}</div>
+                                                    <div className="font-extrabold" style={{ color: 'var(--text-main)' }}>Rs. {(item.price * item.quantity).toFixed(2)}</div>
                                                 </td>
                                                 <td className="px-4 py-4 text-right">
                                                     <button
@@ -1083,14 +1043,14 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                                 className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all`}
                                                                 style={item.salesType !== 'Loose' ? { background: 'var(--surface)', color: 'var(--success)', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' } : { color: 'var(--text-muted)' }}
                                                             >
-                                                                Bag
+                                                                Pack
                                                             </button>
                                                             <button
                                                                 onClick={() => item.salesType !== 'Loose' && toggleSalesType(item.internalId || item.id)}
                                                                 className={`px-2 py-1 text-[10px] font-bold rounded-md transition-all`}
                                                                 style={item.salesType === 'Loose' ? { background: 'var(--surface)', color: 'var(--success)', boxShadow: '0 1px 2px 0 rgba(0,0,0,0.05)' } : { color: 'var(--text-muted)' }}
                                                             >
-                                                                Loose
+                                                                Bulk
                                                             </button>
                                                         </div>
                                                     )}
@@ -1109,7 +1069,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                             <div>
                                                 <label className="text-[10px] font-bold uppercase" style={{ color: 'var(--text-muted)' }}>Price</label>
                                                 <div className="relative">
-                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>{business.currency}</span>
+                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>Rs.</span>
                                                     <input
                                                         className="w-full pl-9 pr-2 py-2 border rounded-lg text-sm font-bold focus:ring-1"
                                                         type="number"
@@ -1136,7 +1096,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
 
                                         <div className="pt-3 border-t border-dashed flex justify-between items-center" style={{ borderColor: 'var(--border)' }}>
                                             <span className="text-sm font-medium" style={{ color: 'var(--text-muted)' }}>Subtotal</span>
-                                            <span className="text-xl font-black" style={{ color: 'var(--text-main)' }}>{business.currency} {(item.price * item.quantity).toFixed(2)}</span>
+                                            <span className="text-xl font-black" style={{ color: 'var(--text-main)' }}>Rs. {(item.price * item.quantity).toFixed(2)}</span>
                                         </div>
                                     </div>
                                 )) : (
@@ -1151,17 +1111,17 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                     <div className="lg:col-span-1">
                         <div className="card p-6 shadow-xl border-t-4 sticky top-[86px]" style={{ borderColor: 'var(--primary)', background: 'var(--surface)', color: 'var(--text-main)' }}>
                             <h3 className="text-xl font-bold mb-6 flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
-                                <Receipt size={22} style={{ color: 'var(--primary)' }} /> {business.getTerm('orders').slice(0, -1)} Summary
+                                <Receipt size={22} style={{ color: 'var(--primary)' }} /> Bill Summary
                             </h3>
 
                             <div className="space-y-4">
                                 <div className="flex justify-between items-center text-sm">
                                     <span className="font-medium tracking-tight" style={{ color: 'var(--text-muted)' }}>Taxable Amount</span>
-                                    <span className="font-bold" style={{ color: 'var(--text-main)' }}>{business.currency} {totals.subtotal.toFixed(2)}</span>
+                                    <span className="font-bold" style={{ color: 'var(--text-main)' }}>Rs. {totals.subtotal.toFixed(2)}</span>
                                 </div>
                                 <div className="flex justify-between items-center text-sm">
                                     <span className="font-medium tracking-tight" style={{ color: 'var(--text-muted)' }}>Total GST</span>
-                                    <span className="font-bold" style={{ color: 'var(--text-main)' }}>{business.currency} {totals.gst.toFixed(2)}</span>
+                                    <span className="font-bold" style={{ color: 'var(--text-main)' }}>Rs. {totals.gst.toFixed(2)}</span>
                                 </div>
                                 <div className="pt-4 border-t space-y-3" style={{ borderColor: 'var(--border)' }}>
                                     <div className="flex justify-between items-center text-sm">
@@ -1212,28 +1172,16 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                             {invoice.appliedCoupon && (
                                                 <div className="flex justify-between items-center bg-green-500/10 p-2 rounded-lg border border-green-500/20">
                                                     <span className="text-[10px] font-bold text-green-600">Applied: {invoice.appliedCoupon.code}</span>
-                                                    <span className="text-[10px] font-black text-green-600">-{business.currency} {pluginDiscount.toFixed(2)}</span>
+                                                    <span className="text-[10px] font-black text-green-600">-Rs. {pluginDiscount.toFixed(2)}</span>
                                                 </div>
                                             )}
                                         </div>
                                     )}
 
-                                    {business.businessMode === 'pharmacy' && (
-                                        <div className="pt-3 space-y-2 border-t border-dashed" style={{ borderColor: 'var(--border)' }}>
-                                            <label className="text-[10px] font-bold uppercase tracking-widest block" style={{ color: 'var(--text-muted)' }}>Attach Prescription</label>
-                                            <input 
-                                                type="file"
-                                                accept="image/*,.pdf"
-                                                onChange={e => setInvoice({ ...invoice, prescription: e.target.files[0] })}
-                                                className="w-full text-[10px] font-bold text-muted file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:text-[10px] file:font-bold file:bg-primary file:text-white"
-                                            />
-                                        </div>
-                                    )}
-
                                     <div className="pt-3 space-y-2">
-                                        <label className="text-[10px] font-extrabold uppercase tracking-widest block" style={{ color: 'var(--text-muted)' }}>Apply Discount ({business.currency})</label>
+                                        <label className="text-[10px] font-extrabold uppercase tracking-widest block" style={{ color: 'var(--text-muted)' }}>Apply Discount (Rs.)</label>
                                         <div className="relative">
-                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: 'var(--danger)' }}>{business.currency}</span>
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold" style={{ color: 'var(--danger)' }}>Rs.</span>
                                             <input
                                                 className="w-full pl-11 pr-4 py-3 border rounded-xl text-xl font-black focus:outline-none focus:ring-2"
                                                 type="number"
@@ -1243,58 +1191,34 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                 style={{ background: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)', color: 'var(--danger)', '--tw-ring-color': 'rgba(239, 68, 68, 0.3)' }}
                                             />
                                         </div>
+                                        <div className="flex justify-between items-center text-sm pt-2">
+                                            <span className="font-bold" style={{ color: 'var(--danger)' }}>Discount</span>
+                                            <span className="font-black" style={{ color: 'var(--danger)' }}>-Rs. {totalDiscount.toFixed(2)}</span>
+                                        </div>
                                     </div>
                                 </div>
 
-                                <div className="pt-6 border-t-4 border-double" style={{ borderColor: 'var(--border)' }}>
-                                    {pluginLoader.isEnabled('loyalty-program') && (
-                                        <div className="flex justify-between items-center bg-blue-500/10 p-2 rounded-lg border border-blue-500/20 mb-3">
-                                            <span className="text-[10px] font-bold text-blue-600 uppercase flex items-center gap-1">
-                                                <Award size={12} /> Points Earned
-                                            </span>
-                                            <span className="text-[10px] font-black text-blue-600">
-                                                +{Math.floor(finalTotal)} pts
-                                            </span>
-                                        </div>
-                                    )}
-
+                                <div className="pt-6 border-t border-double mt-2" style={{ borderColor: 'var(--border)' }}>
                                     <div className="flex justify-between items-end">
-                                        <span className="text-xs font-bold uppercase tracking-tighter" style={{ color: 'var(--text-muted)' }}>Grand Total</span>
+                                        <span className="text-xs font-bold uppercase tracking-tighter" style={{ color: 'var(--text-muted)' }}>Actual Price After Discount</span>
                                         <div className="text-right">
-                                            <span className="text-3xl font-black leading-none block" style={{ color: 'var(--primary)' }}>{business.currency} {finalTotal.toFixed(2)}</span>
+                                            <span className="text-3xl font-black leading-none block" style={{ color: 'var(--primary)' }}>Rs. {finalTotal.toFixed(2)}</span>
                                         </div>
                                     </div>
                                 </div>
 
-                                <div className="flex flex-col gap-3">
-                                    {business.businessMode === 'restaurant' && (
-                                        <button
-                                            onClick={sendToKitchen}
-                                            disabled={isSaving}
-                                            className={`w-full py-3 rounded-2xl font-black text-sm shadow-md flex items-center justify-center gap-2 transition-all duration-300 ${isSaving ? 'opacity-50' : 'hover:scale-[1.02] active:scale-95'}`}
-                                            style={{
-                                                background: 'rgba(var(--primary-rgb), 0.1)',
-                                                color: 'var(--primary)',
-                                                border: '2px solid var(--primary)'
-                                            }}
-                                        >
-                                            <ChefHat size={20} /> SEND TO KITCHEN
-                                        </button>
-                                    )}
-
-                                    <button
-                                        onClick={saveInvoice}
-                                        disabled={isSaving}
-                                        className={`w-full py-4 rounded-2xl font-black text-lg shadow-lg flex items-center justify-center gap-3 transition-all duration-300 ${isSaving ? 'cursor-not-allowed' : 'hover:scale-[1.02] active:scale-95'}`}
-                                        style={{
-                                            background: isSaving ? 'var(--border)' : 'var(--primary)',
-                                            color: isSaving ? 'var(--text-muted)' : 'white',
-                                            boxShadow: isSaving ? 'none' : '0 10px 15px -3px rgba(var(--primary-rgb), 0.3)'
-                                        }}
-                                    >
-                                        {isSaving ? 'Processing...' : (editingInvoice ? <><Pencil size={22} /> UPDATE BILL</> : <><Download size={22} /> SAVE & PRINT</>)}
-                                    </button>
-                                </div>
+                                <button
+                                    onClick={saveInvoice}
+                                    disabled={isSaving}
+                                    className={`w-full py-4 rounded-2xl font-black text-lg shadow-lg flex items-center justify-center gap-3 transition-all duration-300 ${isSaving ? 'cursor-not-allowed' : 'hover:scale-[1.02] active:scale-95'}`}
+                                    style={{
+                                        background: isSaving ? 'var(--border)' : 'var(--primary)',
+                                        color: isSaving ? 'var(--text-muted)' : 'white',
+                                        boxShadow: isSaving ? 'none' : '0 10px 15px -3px rgba(var(--primary-rgb), 0.3)'
+                                    }}
+                                >
+                                    {isSaving ? 'Processing...' : (editingInvoice ? <><Pencil size={22} /> UPDATE BILL</> : <><Download size={22} /> SAVE & PRINT</>)}
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -1358,14 +1282,15 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                         style={{ color: 'var(--text-muted)' }}
                                     >
                                         <div className="flex items-center gap-1">
-                                            {business.getTerm('orders').slice(0, -1)} ID
+                                            Invoice ID
                                             {sortColumn === 'id' && (sortDirection === 'desc' ? <ArrowDown size={14} /> : <ArrowUp size={14} />)}
                                         </div>
                                     </th>
                                     <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>Customer</th>
                                     <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>Items</th>
                                     {!isStaff && <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide text-right" style={{ color: 'var(--text-muted)' }}>Profit</th>}
-                                    <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide text-right" style={{ color: 'var(--text-muted)' }}>Total</th>
+                                    <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide text-right" style={{ color: 'var(--danger)' }}>Discount</th>
+                                    <th className="px-4 py-4 text-xs font-bold uppercase tracking-wide text-right" style={{ color: 'var(--text-muted)' }}>Actual Total</th>
                                     <th className="px-4 py-4 w-[50px]"></th>
                                 </tr>
                             </thead>
@@ -1384,12 +1309,12 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                             <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{inv.customerPhone}</div>
                                         </td>
                                         <td className="px-4 py-4">
-                                            <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{inv.items?.length} {business.getTerm('products')}</span>
+                                            <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{inv.items?.length} items</span>
                                             <div className="text-xs truncate max-w-[200px]" style={{ color: 'var(--text-muted)' }}>{inv.items?.map(i => i.name).join(', ')}</div>
                                         </td>
                                         {!isStaff && (
                                             <td className="px-4 py-4 text-right font-bold" style={{ color: 'var(--success)' }}>
-                                                {business.currency} {(inv.items?.reduce((acc, item) => {
+                                                Rs. {(inv.items?.reduce((acc, item) => {
                                                     const product = products.find(p => p.id === item.id);
                                                     let bagPurchasePrice = 0;
                                                     if (item.originalPrice !== undefined && item.originalPrice !== null) {
@@ -1412,7 +1337,8 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                 }, 0) - (inv.discount || 0)).toFixed(2)}
                                             </td>
                                         )}
-                                        <td className="px-4 py-4 text-right font-black" style={{ color: 'var(--primary)' }}>{business.currency} {inv.totalAmount?.toLocaleString()}</td>
+                                        <td className="px-4 py-4 text-right font-bold" style={{ color: 'var(--danger)' }}>-Rs. {(Number(inv.discount) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                        <td className="px-4 py-4 text-right font-black" style={{ color: 'var(--primary)' }}>Rs. {inv.totalAmount?.toLocaleString()}</td>
                                         <td className="px-4 py-4 text-right">
                                             <div className="flex justify-end gap-1">
                                                 <button
@@ -1436,15 +1362,7 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                     <Pencil size={16} />
                                                 </button>
                                                 <button
-                                                    onClick={() => handleDuplicateInvoice(inv)}
-                                                    className="p-2 rounded-lg transition-colors hover:bg-black/5"
-                                                    style={{ color: '#a855f7' }}
-                                                    title="Duplicate"
-                                                >
-                                                    <Copy size={16} />
-                                                </button>
-                                                <button
-                                                    onClick={() => generateInvoicePDF(inv)}
+                                                    onClick={() => generateInvoicePDF(hydrateInvoiceCustomer(inv))}
                                                     className="p-2 rounded-lg transition-colors hover:bg-black/5"
                                                     style={{ color: 'var(--text-muted)' }}
                                                     title="PDF"
@@ -1459,14 +1377,16 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                 >
                                                     <MessageCircle size={16} />
                                                 </button>
-                                                <button
-                                                    onClick={() => generateThermalInvoicePDF(inv)}
-                                                    className="p-2 rounded-lg transition-colors hover:bg-black/5"
-                                                    style={{ color: 'var(--text-main)' }}
-                                                    title="Thermal"
-                                                >
-                                                    <Printer size={16} />
-                                                </button>
+                                                {thermalPrinterEnabled && (
+                                                    <button
+                                                        onClick={() => generateThermalInvoicePDF(hydrateInvoiceCustomer(inv))}
+                                                        className="p-2 rounded-lg transition-colors hover:bg-black/5"
+                                                        style={{ color: 'var(--text-main)' }}
+                                                        title="Thermal Print"
+                                                    >
+                                                        <Printer size={16} />
+                                                    </button>
+                                                )}
                                             </div>
                                         </td>
                                     </tr>
@@ -1492,16 +1412,16 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                                 new Date(inv.timestamp || inv.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit' })
                                             }
                                         </div>
-                                        <div className="font-black text-xl" style={{ color: 'var(--primary)' }}>{business.currency} {inv.totalAmount?.toLocaleString()}</div>
+                                        <div className="font-black text-xl" style={{ color: 'var(--primary)' }}>Rs. {inv.totalAmount?.toLocaleString()}</div>
                                     </div>
                                 </div>
 
                                 <div className="flex flex-wrap gap-2 py-2 border-y border-dashed" style={{ borderColor: 'var(--border)' }}>
-                                    <span className="text-[10px] font-bold px-2 py-1 rounded bg-black/5" style={{ color: 'var(--text-secondary)' }}>{inv.items?.length} {business.getTerm('products')}</span>
+                                    <span className="text-[10px] font-bold px-2 py-1 rounded bg-black/5" style={{ color: 'var(--text-secondary)' }}>{inv.items?.length} Items</span>
                                     <span className="text-[10px] font-bold px-2 py-1 rounded bg-accent text-primary uppercase tracking-widest">{inv.paymentMode}</span>
                                     {!isStaff && (
                                         <span className="text-[10px] font-bold px-2 py-1 rounded bg-accent text-primary">
-                                            Profit: {business.currency} {(inv.items?.reduce((acc, item) => {
+                                            Profit: Rs. {(inv.items?.reduce((acc, item) => {
                                                 const product = products.find(p => p.id === item.id);
                                                 let unitCost = item.originalPrice || item.costPrice || (product?.purchasePrice) || 0;
                                                 const isLoose = item.salesType === 'Loose' || (item.name || '').toLowerCase().includes('(loose)');
@@ -1513,17 +1433,45 @@ const Billing = ({ initialHistory = false, isStaff = false, setActiveTab }) => {
                                             }, 0) - (inv.discount || 0)).toFixed(0)}
                                         </span>
                                     )}
+                                    {(Number(inv.discount) || 0) > 0 && (
+                                        <span className="text-[10px] font-bold px-2 py-1 rounded bg-red-500/10 text-red-500">
+                                            Discount: -Rs. {Number(inv.discount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        </span>
+                                    )}
+                                    <span className="text-[10px] font-bold px-2 py-1 rounded bg-accent text-primary">
+                                        Actual: Rs. {Number(inv.totalAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </span>
                                 </div>
 
-                                <div className="flex justify-between items-center pt-1">
-                                    <div className="flex gap-1">
-                                        <button onClick={() => shareToWhatsApp(inv)} className="p-2 rounded-lg bg-green-500/10 text-green-500"><MessageCircle size={18} /></button>
-                                        <button onClick={() => generateInvoicePDF(inv)} className="p-2 rounded-lg bg-black/5 text-muted"><Download size={18} /></button>
-                                        <button onClick={() => generateThermalInvoicePDF(inv)} className="p-2 rounded-lg bg-black/5 text-main"><Printer size={18} /></button>
+                                <div className="flex justify-between items-center flex-wrap gap-2 pt-1">
+                                    <div className="flex gap-1.5 items-center">
+                                        <button onClick={() => shareToWhatsApp(inv)} className="p-2 rounded-xl transition-all" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#10b981' }} title="WhatsApp"><Smartphone size={16} /></button>
+                                        <button onClick={() => generateInvoicePDF(hydrateInvoiceCustomer(inv))} className="p-2 rounded-xl transition-all" style={{ background: 'var(--background)', color: 'var(--text-muted)' }} title="PDF"><Download size={16} /></button>
+                                        {thermalPrinterEnabled && (
+                                            <button onClick={() => generateThermalInvoicePDF(hydrateInvoiceCustomer(inv))} className="p-2 rounded-xl transition-all" style={{ background: 'var(--background)', color: 'var(--text-main)' }} title="Thermal Print"><Printer size={16} /></button>
+                                        )}
                                     </div>
-                                    <div className="flex gap-1">
-                                        <button onClick={() => handleEdit(inv)} className="px-3 py-2 rounded-lg bg-blue-500 text-white text-[10px] font-black uppercase">Edit</button>
-                                        <button onClick={() => handleDuplicateInvoice(inv)} className="p-2 rounded-lg bg-purple-500/10 text-purple-500"><Copy size={18} /></button>
+                                    <div className="flex gap-1.5 items-center">
+                                        <button
+                                            onClick={async () => {
+                                                if (await showConfirm("Confirm Return?", "Stock will be added back.")) {
+                                                    firestoreService.deleteInvoice(inv.docId || inv.id).catch(err => showError(err.message));
+                                                }
+                                            }}
+                                            className="px-2.5 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition-all"
+                                            style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444' }}
+                                            title="Return / Delete"
+                                        >
+                                            <Trash2 size={14} /> DEL
+                                        </button>
+                                        <button
+                                            onClick={() => handleEdit(inv)}
+                                            className="px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 text-white shadow-sm transition-all"
+                                            style={{ background: '#1e543b' }}
+                                            title="Edit Invoice"
+                                        >
+                                            <Pencil size={14} /> EDIT
+                                        </button>
                                     </div>
                                 </div>
                             </div>

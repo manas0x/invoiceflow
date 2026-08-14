@@ -2,10 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { BarChart3, Download, Calendar, Filter, ArrowUpRight, ArrowDownRight, Package, TrendingUp, Wallet, PieChart, CreditCard, Banknote, CheckCircle, Clock } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { firestoreService } from '../services/firestoreService'
-import { useBusiness } from '../context/BusinessContext'
 
 const Reports = () => {
-    const { business } = useBusiness();
     const [invoices, setInvoices] = useState([])
     const [products, setProducts] = useState([])
     const [purchases, setPurchases] = useState([])
@@ -248,22 +246,22 @@ const Reports = () => {
             {/* Key Metrics Row 1: Sales summary */}
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: isMobile ? '12px' : '20px', marginBottom: '16px' }}>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Total {business.getTerm('orders')}</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: 'var(--primary)' }}>{business.currency}{totalSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Total Sales</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: 'var(--primary)' }}>Rs.{totalSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <TrendingUp size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: 'var(--primary)' }} />
                 </div>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Cash {business.getTerm('orders')}</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#10b981' }}>{business.currency}{cashSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Cash Sales</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#10b981' }}>Rs.{cashSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <Banknote size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: '#10b981' }} />
                 </div>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Credit {business.getTerm('orders')}</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#f59e0b' }}>{business.currency}{creditSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Credit Sales</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#f59e0b' }}>Rs.{creditSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <CreditCard size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: '#f59e0b' }} />
                 </div>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Total Bills</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Invoices</div>
                     <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: 'var(--secondary)' }}>{filteredInvoices.length}</div>
                 </div>
             </div>
@@ -272,23 +270,23 @@ const Reports = () => {
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)', gap: isMobile ? '12px' : '20px', marginBottom: '24px' }}>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.3)' }}>
                     <div style={{ color: '#10b981', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', marginBottom: '8px' }}>✓ Credit Received</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#10b981' }}>{business.currency}{Math.max(0, receivedCredit).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#10b981' }}>Rs.{Math.max(0, receivedCredit).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <CheckCircle size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: '#10b981' }} />
                 </div>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.3)' }}>
                     <div style={{ color: '#ef4444', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', marginBottom: '8px' }}>⏳ Remaining Due</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#ef4444' }}>{business.currency}{remainingCredit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: '#ef4444' }}>Rs.{remainingCredit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <Clock size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: '#ef4444' }} />
                 </div>
                 <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '20px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
                     <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>GST Return (5%)</div>
-                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: 'var(--primary-light)' }}>{business.currency}{gstCollected.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div style={{ fontSize: isMobile ? '16px' : '22px', fontWeight: 800, color: 'var(--primary-light)' }}>Rs.{gstCollected.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                     <Wallet size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: 'var(--primary-light)' }} />
                 </div>
                 <div className="card shadow-sm p-4 md:p-5 border-l-4 border-primary" style={{ background: 'var(--surface)' }}>
                     <div className="text-[10px] font-black text-muted uppercase tracking-widest mb-2">Net Profit</div>
-                    <div className="text-xl md:text-2xl font-black text-primary">{business.currency}{netProfit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    <div className="text-[10px] text-muted mt-1">Purchase: {business.currency}{totalPurchase.toLocaleString('en-IN', { minimumFractionDigits: 0 })}</div>
+                    <div className="text-xl md:text-2xl font-black text-primary">Rs.{netProfit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <div className="text-[10px] text-muted mt-1">Purchase: Rs.{totalPurchase.toLocaleString('en-IN', { minimumFractionDigits: 0 })}</div>
                 </div>
             </div>
 
@@ -296,7 +294,7 @@ const Reports = () => {
                 {/* Top Products */}
                 <div className="card" style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-main)' }}>
                     <h3 style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}>
-                        <BarChart3 size={20} color="var(--primary)" /> Top {business.getTerm('products')}
+                        <BarChart3 size={20} color="var(--primary)" /> Top Products
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                         {topProducts.length > 0 ? topProducts.map(([name, qty], i) => (
@@ -322,7 +320,7 @@ const Reports = () => {
                             <div key={i}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
                                     <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-main)' }}>{mode}</span>
-                                    <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-main)' }}>{business.currency}{amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                    <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-main)' }}>Rs.{amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                 </div>
                                 <div style={{ width: '100%', height: '8px', background: 'var(--background)', borderRadius: '4px', overflow: 'hidden' }}>
                                     <div style={{ width: `${(amount / (totalSales || 1)) * 100}%`, height: '100%', background: mode === 'Cash' ? 'var(--primary)' : '#3b82f6' }}></div>
@@ -339,19 +337,19 @@ const Reports = () => {
             <div className="card" style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-main)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '8px' }}>
                     <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '16px' }}>
-                        <Package size={20} color="var(--primary)" /> {business.getTerm('inventory')} Valuation
+                        <Package size={20} color="var(--primary)" /> Inventory Valuation
                     </h3>
                     <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Latest snapshot</div>
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '16px' }}>
                     <div style={{ padding: '20px', background: 'var(--background)', borderRadius: '12px', border: '1px solid var(--border)' }}>
                         <div style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '8px' }}>Varieties</div>
-                        <div style={{ fontSize: '20px', fontWeight: 800 }}>{products.length} {business.getTerm('products')}</div>
+                        <div style={{ fontSize: '20px', fontWeight: 800 }}>{products.length} Items</div>
                     </div>
                     <div style={{ padding: '20px', background: 'var(--background)', borderRadius: '12px', border: '1px solid var(--border)' }}>
                         <div style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '8px' }}>Current Value</div>
                         <div style={{ fontSize: '20px', fontWeight: 800, color: 'var(--primary)' }}>
-                            {business.currency}{products.reduce((acc, p) => acc + (Number(p.purchasePrice || 0) * Number(p.stock || 0)), 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            Rs.{products.reduce((acc, p) => acc + (Number(p.purchasePrice || 0) * Number(p.stock || 0)), 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </div>
                     </div>
                     <div style={{ padding: '20px', background: 'var(--accent)', borderRadius: '12px', border: '1px solid var(--primary-light)' }}>

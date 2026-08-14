@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
-import {
-    Download,
-    Calendar,
-    FileText,
-    ArrowUpRight,
-    ArrowDownRight,
-    TrendingUp,
+import { 
+    Download, 
+    Calendar, 
+    FileText, 
+    ArrowUpRight, 
+    ArrowDownRight, 
+    TrendingUp, 
     ShoppingCart,
     Package,
     Calculator,
@@ -13,10 +13,8 @@ import {
 } from 'lucide-react'
 import { firestoreService } from '../services/firestoreService'
 import * as XLSX from 'xlsx'
-import { useBusiness } from '../context/BusinessContext'
 
 const GstReports = () => {
-    const business = useBusiness()
     const [invoices, setInvoices] = useState([])
     const [purchases, setPurchases] = useState([])
     const [products, setProducts] = useState([])
@@ -226,8 +224,8 @@ const GstReports = () => {
                     <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-muted)' }}>
                         <TrendingUp size={14} className="text-blue-500" /> Sales GST Return (5% Margin)
                     </div>
-                    <div className="text-3xl font-black text-blue-600 tracking-tight">{business.currency}{salesGstSummary.totalGst.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    <p className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>Calculated on Taxable Margin of {business.currency}{salesGstSummary.totalTaxable.toLocaleString()}</p>
+                    <div className="text-3xl font-black text-blue-600 tracking-tight">Rs.{salesGstSummary.totalGst.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <p className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>Calculated on Taxable Margin of Rs.{salesGstSummary.totalTaxable.toLocaleString()}</p>
                     <ArrowUpRight size={40} className="absolute -right-2 -bottom-2 text-blue-500 opacity-10" />
                 </div>
 
@@ -235,8 +233,8 @@ const GstReports = () => {
                     <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--text-muted)' }}>
                         <ShoppingCart size={14} className="text-emerald-500" /> Input Tax Credit (ITC)
                     </div>
-                    <div className="text-3xl font-black text-emerald-600 tracking-tight">{business.currency}{purchaseGstSummary.totalItc.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                    <p className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>Total Tax Paid to Suppliers on {business.currency}{purchaseGstSummary.totalTaxable.toLocaleString()}</p>
+                    <div className="text-3xl font-black text-emerald-600 tracking-tight">Rs.{purchaseGstSummary.totalItc.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                    <p className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>Total Tax Paid to Suppliers on Rs.{purchaseGstSummary.totalTaxable.toLocaleString()}</p>
                     <ArrowDownRight size={40} className="absolute -right-2 -bottom-2 text-emerald-500 opacity-10" />
                 </div>
 
@@ -245,7 +243,7 @@ const GstReports = () => {
                         <Calculator size={14} className="text-purple-500" /> Net Liability / Refund
                     </div>
                     <div className={`text-3xl font-black tracking-tight ${salesGstSummary.totalGst >= purchaseGstSummary.totalItc ? 'text-red-500' : 'text-emerald-500'}`}>
-                        {business.currency}{Math.abs(salesGstSummary.totalGst - purchaseGstSummary.totalItc).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        Rs.{Math.abs(salesGstSummary.totalGst - purchaseGstSummary.totalItc).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         <span className="text-sm ml-1 font-bold uppercase">{salesGstSummary.totalGst >= purchaseGstSummary.totalItc ? 'Payable' : 'Credit'}</span>
                     </div>
                     <p className="text-[10px] mt-2" style={{ color: 'var(--text-muted)' }}>Sales Margin GST - Purchase ITC</p>
@@ -274,9 +272,9 @@ const GstReports = () => {
                                 {Object.entries(salesGstSummary.slabs).sort().map(([slab, data]) => (
                                     <tr key={slab} className="hover:bg-black/5">
                                         <td className="px-4 py-3 font-black" style={{ color: 'var(--text-main)' }}>{slab}</td>
-                                        <td className="px-4 py-3 text-right">{business.currency}{data.taxable.toLocaleString()}</td>
-                                        <td className="px-4 py-3 text-right">{business.currency}{data.margin.toLocaleString()}</td>
-                                        <td className="px-4 py-3 text-right font-black text-blue-600">{business.currency}{data.gst.toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-right">Rs.{data.taxable.toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-right">Rs.{data.margin.toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-right font-black text-blue-600">Rs.{data.gst.toLocaleString()}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -302,8 +300,8 @@ const GstReports = () => {
                                 {Object.entries(purchaseGstSummary.slabs).sort().map(([slab, data]) => (
                                     <tr key={slab} className="hover:bg-black/5">
                                         <td className="px-4 py-3 font-black" style={{ color: 'var(--text-main)' }}>{slab}</td>
-                                        <td className="px-4 py-3 text-right">{business.currency}{data.taxable.toLocaleString()}</td>
-                                        <td className="px-4 py-3 text-right font-black text-emerald-600">{business.currency}{data.itc.toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-right">Rs.{data.taxable.toLocaleString()}</td>
+                                        <td className="px-4 py-3 text-right font-black text-emerald-600">Rs.{data.itc.toLocaleString()}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -318,7 +316,7 @@ const GstReports = () => {
                 <div>
                     <h4 className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>GST Compliance Note</h4>
                     <p className="text-xs mt-1 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
-                        Sales GST is calculated based on the <b>fixed 5% profit margin logic</b> (Taxable Margin = Purchase Cost × 5%).
+                        Sales GST is calculated based on the <b>fixed 5% profit margin logic</b> (Taxable Margin = Purchase Cost × 5%). 
                         Purchase GST reflects the actual Input Tax Credit (ITC) paid to suppliers as recorded in the Purchase Entry section.
                     </p>
                 </div>

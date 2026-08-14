@@ -3,24 +3,24 @@ import { Plus, Search, Trash2, Save, History, User, Pencil, X } from 'lucide-rea
 import { firestoreService } from '../services/firestoreService'
 import { generatePurchasePDF } from '../utils/pdfGenerator'
 import { showError, showSuccess, showConfirm } from '../utils/alert'
-import { useBusiness } from '../context/BusinessContext'
 
 const Purchases = ({ isStaff }) => {
-    const business = useBusiness()
     const [products, setProducts] = useState([])
     const [purchases, setPurchases] = useState([])
     const [suppliers, setSuppliers] = useState([])
     const [isViewHistory, setIsViewHistory] = useState(false)
     const [loading, setLoading] = useState(true)
     const [editingPurchase, setEditingPurchase] = useState(null)
-    const [newProductModal, setNewProductModal] = useState({ open: false, name: '', category: 'General', unit: 'Bag', gst: 5 })
+    const [newProductModal, setNewProductModal] = useState({ open: false, name: '', category: 'General', unit: 'Piece', gst: 5 })
 
     const [newPurchase, setNewPurchase] = useState({
         supplierName: '',
+        supplierId: '',
         invoiceNo: '',
         date: new Date().toISOString().split('T')[0],
         items: [],
-        totalAmount: 0
+        totalAmount: 0,
+        paymentMode: 'Cash'
     })
 
     const [searchTerm, setSearchTerm] = useState('')
@@ -37,6 +37,12 @@ const Purchases = ({ isStaff }) => {
         return month >= 3 ? `${year}-${year + 1}` : `${year - 1}-${year}`;
     }
     const [selectedFY, setSelectedFY] = useState(getCurrentFY())
+    const [purchaseSearch, setPurchaseSearch] = useState('')
+    const [purchaseDateRange, setPurchaseDateRange] = useState(() => {
+        const today = new Date().toISOString().split('T')[0]
+        const startYear = Number(getCurrentFY().split('-')[0])
+        return { start: `${startYear}-04-01`, end: today }
+    })
 
     useEffect(() => {
         const unsubProducts = firestoreService.subscribeProducts(setProducts)
@@ -54,7 +60,7 @@ const Purchases = ({ isStaff }) => {
 
     const handleSupplierSearch = (val) => {
         setSupplierSearch(val)
-        setNewPurchase({ ...newPurchase, supplierName: val })
+        setNewPurchase({ ...newPurchase, supplierName: val, supplierId: '' })
         if (val.length > 0) {
             const filtered = suppliers.filter(s => (s.name || '').toLowerCase().includes(val.toLowerCase()))
             setSupplierResults(filtered)
@@ -64,7 +70,7 @@ const Purchases = ({ isStaff }) => {
     }
 
     const selectSupplier = (s) => {
-        setNewPurchase({ ...newPurchase, supplierName: s.name })
+        setNewPurchase({ ...newPurchase, supplierName: s.name, supplierId: s.id })
         setSupplierSearch(s.name)
         setSupplierResults([])
     }
@@ -73,6 +79,7 @@ const Purchases = ({ isStaff }) => {
         setEditingPurchase(pur)
         setNewPurchase({
             ...pur,
+            supplierId: pur.supplierId || suppliers.find(s => (s.name || '').trim().toLowerCase() === (pur.supplierName || '').trim().toLowerCase())?.id || '',
             date: pur.date || new Date().toISOString().split('T')[0]
         })
         setSupplierSearch(pur.supplierName)
@@ -81,7 +88,7 @@ const Purchases = ({ isStaff }) => {
 
     const resetForm = () => {
         setNewPurchase({
-            supplierName: '', invoiceNo: '', date: new Date().toISOString().split('T')[0], items: [], totalAmount: 0
+            supplierName: '', supplierId: '', invoiceNo: '', date: new Date().toISOString().split('T')[0], items: [], totalAmount: 0, paymentMode: 'Cash'
         })
         setSupplierSearch('')
         setEditingPurchase(null)
@@ -230,6 +237,12 @@ const Purchases = ({ isStaff }) => {
             return
         }
 
+        const todayStr = new Date().toISOString().split('T')[0];
+        if (newPurchase.date > todayStr) {
+            showError("Future date is not allowed for purchase entry.");
+            return;
+        }
+
         try {
             if (editingPurchase) {
                 await firestoreService.updatePurchase(editingPurchase.docId || editingPurchase.id, {
@@ -244,8 +257,10 @@ const Purchases = ({ isStaff }) => {
                     totalAmount: total,
                     id: purchaseId
                 }
-                await firestoreService.addPurchase(purchaseData)
-                showSuccess("Purchase Entry Saved & PDF Generated!")
+                const savedPurchaseId = await firestoreService.addPurchase(purchaseData)
+                showSuccess(String(savedPurchaseId).startsWith('OFFLINE-')
+                    ? "Purchase saved offline. It will sync when internet returns."
+                    : "Purchase Entry Saved & PDF Generated!")
             }
 
             resetForm()
@@ -265,7 +280,7 @@ const Purchases = ({ isStaff }) => {
                     open: true,
                     name: searchTerm.trim(),
                     category: 'General',
-                    unit: 'Bag',
+                    unit: 'Piece',
                     gst: 5
                 });
             }
@@ -291,7 +306,7 @@ const Purchases = ({ isStaff }) => {
                 stock: 0
             });
         }
-        setNewProductModal({ open: false, name: '', category: 'General', unit: 'Bag', gst: 5 });
+        setNewProductModal({ open: false, name: '', category: 'General', unit: 'Piece', gst: 5 });
     }
 
     const [isMobile, setIsMobile] = useState(window.innerWidth <= 768)
@@ -301,6 +316,42 @@ const Purchases = ({ isStaff }) => {
         window.addEventListener('resize', handleResize)
         return () => window.removeEventListener('resize', handleResize)
     }, [])
+
+    const standardizePurchaseDate = (dateStr, fallback) => {
+        if (!dateStr && !fallback) return ''
+        const raw = String(dateStr || fallback)
+        if (raw.includes('T')) return raw.split('T')[0]
+        if (/^\d{2}-\d{2}-\d{4}$/.test(raw)) {
+            const [day, month, year] = raw.split('-')
+            return `${year}-${month}-${day}`
+        }
+        return raw.slice(0, 10)
+    }
+
+    const filteredPurchases = purchases.filter(purchase => {
+        const search = purchaseSearch.toLowerCase().trim()
+        const searchMatch = !search ||
+            (purchase.supplierName || '').toLowerCase().includes(search) ||
+            (purchase.invoiceNo || '').toLowerCase().includes(search) ||
+            (purchase.id || '').toLowerCase().includes(search)
+
+        // Match Sales History: a text search searches all dates.
+        if (search) return searchMatch
+
+        const purchaseDate = standardizePurchaseDate(purchase.date, purchase.createdAt)
+        return purchaseDate >= purchaseDateRange.start && purchaseDate <= purchaseDateRange.end
+    })
+
+    const handlePurchaseFYChange = (fy) => {
+        setSelectedFY(fy)
+        const startYear = Number(fy.split('-')[0])
+        const today = new Date().toISOString().split('T')[0]
+        const fyEnd = `${startYear + 1}-03-31`
+        setPurchaseDateRange({
+            start: `${startYear}-04-01`,
+            end: fy === getCurrentFY() && today < fyEnd ? today : fyEnd
+        })
+    }
 
     return (
         <div className="purchases space-y-6">
@@ -339,7 +390,7 @@ const Purchases = ({ isStaff }) => {
                                 <span className="flex items-center gap-2"><User size={20} className="text-primary" /> Supplier Information</span>
                                 {editingPurchase && <button onClick={resetForm} className="text-xs bg-red-50 text-red-500 px-2 py-1 rounded-lg flex items-center gap-1"><X size={12} /> Cancel Edit</button>}
                             </h3>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
                                 <div className="space-y-1 relative">
                                     <label className="text-[10px] font-extrabold uppercase tracking-widest pl-1" style={{ color: 'var(--text-muted)' }}>Agency Name</label>
                                     <input
@@ -347,7 +398,7 @@ const Purchases = ({ isStaff }) => {
                                         style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
                                         value={newPurchase.supplierName}
                                         onChange={e => handleSupplierSearch(e.target.value)}
-                                        type="text" placeholder="e.g. IFFCO Agency"
+                                        type="text" placeholder="e.g. Main Supplier"
                                         autoComplete="off"
                                     />
                                     {supplierResults.length > 0 && (
@@ -374,10 +425,34 @@ const Purchases = ({ isStaff }) => {
                                         className="w-full px-4 py-2.5 border rounded-xl focus:ring-2 focus:ring-opacity-20 transition-all font-medium"
                                         style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
                                         value={newPurchase.date}
-                                        onChange={e => setNewPurchase({ ...newPurchase, date: e.target.value })}
+                                        onChange={e => {
+                                            const selectedDate = e.target.value;
+                                            const todayStr = new Date().toISOString().split('T')[0];
+                                            if (selectedDate && selectedDate > todayStr) {
+                                                showError("Future date is not allowed.");
+                                                setNewPurchase({ ...newPurchase, date: todayStr });
+                                            } else {
+                                                setNewPurchase({ ...newPurchase, date: selectedDate });
+                                            }
+                                        }}
                                         type="date"
                                         min="2025-12-31"
+                                        max={new Date().toISOString().split('T')[0]}
                                     />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-extrabold uppercase tracking-widest pl-1" style={{ color: 'var(--text-muted)' }}>Mode of Payment</label>
+                                    <select
+                                        className="w-full px-4 py-2.5 border rounded-xl focus:ring-2 focus:ring-opacity-20 transition-all font-medium"
+                                        style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)' }}
+                                        value={newPurchase.paymentMode || 'Cash'}
+                                        onChange={e => setNewPurchase({ ...newPurchase, paymentMode: e.target.value })}
+                                    >
+                                        <option value="Cash">Cash</option>
+                                        <option value="UPI">UPI</option>
+                                        <option value="Bank Transfer">Bank Transfer</option>
+                                        <option value="Credit">Credit</option>
+                                    </select>
                                 </div>
                             </div>
                         </div>
@@ -409,7 +484,7 @@ const Purchases = ({ isStaff }) => {
                                                     open: true,
                                                     name: searchTerm.trim(),
                                                     category: 'General',
-                                                    unit: 'Bag',
+                                                    unit: 'Piece',
                                                     gst: 5
                                                 })}
                                                 className="p-4 cursor-pointer hover:opacity-80 font-black flex items-center gap-2"
@@ -445,7 +520,7 @@ const Purchases = ({ isStaff }) => {
                                                 </td>
                                                 <td className="px-4 py-4">
                                                     <div className="relative">
-                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>{business.currency}</span>
+                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>Rs.</span>
                                                         <input
                                                             className="pl-5 pr-2 py-2 border rounded-lg text-sm font-bold focus:ring-1 shadow-sm"
                                                             style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)', width: `${Math.max(6, (item.rateExcl?.toString().length || 0) + 2)}ch`, minWidth: '80px' }}
@@ -466,7 +541,7 @@ const Purchases = ({ isStaff }) => {
                                                 </td>
                                                 <td className="px-4 py-4">
                                                     <div className="relative">
-                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>{business.currency}</span>
+                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>Rs.</span>
                                                         <input
                                                             className="pl-5 pr-2 py-2 border rounded-lg text-sm font-bold focus:ring-1 shadow-sm"
                                                             style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)', width: `${Math.max(6, (item.rateIncl?.toString().length || 0) + 2)}ch`, minWidth: '80px' }}
@@ -487,7 +562,7 @@ const Purchases = ({ isStaff }) => {
                                                 </td>
                                                 <td className="px-4 py-4 text-right">
                                                     <div className="relative">
-                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>{business.currency}</span>
+                                                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'var(--text-muted)' }}>Rs.</span>
                                                         <input
                                                             className="pl-5 pr-2 py-2 border rounded-lg text-sm font-extrabold focus:ring-1 text-right shadow-sm"
                                                             style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--text-main)', '--tw-ring-color': 'var(--primary)', width: `${Math.max(7, (item.lineTotal?.toString().length || 0) + 2)}ch`, minWidth: '100px' }}
@@ -539,7 +614,7 @@ const Purchases = ({ isStaff }) => {
                                             <div>
                                                 <label className="text-[10px] font-bold text-gray-400 uppercase">Rate (Incl)</label>
                                                 <div className="relative">
-                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm">{business.currency}</span>
+                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm">Rs.</span>
                                                     <input
                                                         className="w-full pl-5 pr-2 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm font-bold text-gray-700 focus:border-primary focus:ring-1 focus:ring-primary"
                                                         type="number"
@@ -572,7 +647,7 @@ const Purchases = ({ isStaff }) => {
                                             <div>
                                                 <label className="text-[10px] font-bold text-gray-400 uppercase">Total (Incl)</label>
                                                 <div className="relative">
-                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm">{business.currency}</span>
+                                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm">Rs.</span>
                                                     <input
                                                         className="w-full pl-5 pr-2 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm font-bold text-gray-700 focus:border-primary focus:ring-1 focus:ring-primary text-right"
                                                         type="number"
@@ -602,7 +677,7 @@ const Purchases = ({ isStaff }) => {
                                 </div>
                                 <div className="p-4 bg-primary/5 rounded-2xl border border-primary/10">
                                     <div className="text-[10px] font-extrabold text-primary uppercase tracking-widest pl-1 mb-1">Total Payable Amount</div>
-                                    <div className="text-3xl font-black text-primary tracking-tighter leading-none">{business.currency}{total.toFixed(2)}</div>
+                                    <div className="text-3xl font-black text-primary tracking-tighter leading-none">Rs.{total.toFixed(2)}</div>
                                 </div>
                                 <button
                                     onClick={handleSave}
@@ -616,20 +691,15 @@ const Purchases = ({ isStaff }) => {
                 </div>
             ) : (
                 <div className="card w-full" style={{ padding: 0, overflow: 'hidden', background: 'var(--surface)', borderColor: 'var(--border)' }}>
-                    <div className="p-4 border-b flex justify-between items-center" style={{ borderColor: 'var(--border)', background: 'var(--background)' }}>
+                    <div className="p-4 border-b flex flex-col md:flex-row md:justify-between md:items-center gap-4" style={{ borderColor: 'var(--border)', background: 'var(--background)' }}>
                         <h3 className="font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
                             <History size={18} /> Purchase History
                         </h3>
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-4 flex-wrap">
                             <div className="text-right">
                                 <div className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Total Purchase</div>
                                 <div className="text-lg font-bold" style={{ color: 'var(--primary)' }}>
-                                    {business.currency}{purchases.filter(p => {
-                                        const d = new Date(p.date || new Date());
-                                        const y = d.getFullYear();
-                                        const fy = d.getMonth() >= 3 ? `${y}-${y + 1}` : `${y - 1}-${y}`;
-                                        return fy === selectedFY;
-                                    }).reduce((acc, curr) => acc + (parseFloat(curr.totalAmount) || 0), 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                                    Rs.{filteredPurchases.reduce((acc, curr) => acc + (parseFloat(curr.totalAmount) || 0), 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                                 </div>
                             </div>
                             <div className="h-8 w-px bg-gray-200"></div>
@@ -637,7 +707,7 @@ const Purchases = ({ isStaff }) => {
                                 <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Financial Year</span>
                                 <select
                                     value={selectedFY}
-                                    onChange={(e) => setSelectedFY(e.target.value)}
+                                    onChange={(e) => handlePurchaseFYChange(e.target.value)}
                                     className="px-2 py-1 border rounded-md text-sm font-bold focus:border-primary outline-none shadow-sm cursor-pointer"
                                     style={{ background: 'var(--surface)', borderColor: 'var(--border)', color: 'var(--text-main)' }}
                                 >
@@ -650,6 +720,39 @@ const Purchases = ({ isStaff }) => {
                                     ))}
                                 </select>
                             </div>
+                        </div>
+                    </div>
+                    <div className="p-4 border-b flex flex-col md:flex-row gap-3 md:items-center" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[13px] font-bold" style={{ color: 'var(--text-muted)' }}>From:</span>
+                            <input
+                                type="date"
+                                value={purchaseDateRange.start}
+                                onChange={e => setPurchaseDateRange({ ...purchaseDateRange, start: e.target.value })}
+                                className="flex-1 md:w-36 px-2 py-1.5 rounded-lg border text-sm font-bold"
+                                style={{ background: 'var(--background)', color: 'var(--text-main)', borderColor: 'var(--border)' }}
+                            />
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[13px] font-bold" style={{ color: 'var(--text-muted)' }}>To:</span>
+                            <input
+                                type="date"
+                                value={purchaseDateRange.end}
+                                onChange={e => setPurchaseDateRange({ ...purchaseDateRange, end: e.target.value })}
+                                className="flex-1 md:w-36 px-2 py-1.5 rounded-lg border text-sm font-bold"
+                                style={{ background: 'var(--background)', color: 'var(--text-main)', borderColor: 'var(--border)' }}
+                            />
+                        </div>
+                        <div className="relative flex-1 md:max-w-xs">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2" size={14} style={{ color: 'var(--text-muted)' }} />
+                            <input
+                                type="text"
+                                placeholder="Search supplier, invoice or ID..."
+                                value={purchaseSearch}
+                                onChange={e => setPurchaseSearch(e.target.value)}
+                                className="w-full pl-9 pr-3 py-2 rounded-lg border text-sm font-bold"
+                                style={{ background: 'var(--background)', color: 'var(--text-main)', borderColor: 'var(--border)' }}
+                            />
                         </div>
                     </div>
                     <div className="table-container">
@@ -666,19 +769,14 @@ const Purchases = ({ isStaff }) => {
                                 </tr>
                             </thead>
                             <tbody className="divide-y" style={{ divideColor: 'var(--border)' }}>
-                                {purchases.filter(p => {
-                                    const d = new Date(p.date);
-                                    const y = d.getFullYear();
-                                    const fy = d.getMonth() >= 3 ? `${y}-${y + 1}` : `${y - 1}-${y}`;
-                                    return fy === selectedFY;
-                                }).slice().reverse().map(pur => (
+                                {filteredPurchases.slice().reverse().map(pur => (
                                     <tr key={pur.id} className="transition-colors hover:bg-black/5" style={{ background: 'var(--surface)' }}>
                                         <td className="px-4 py-4" style={{ color: 'var(--text-main)' }}>{pur.date}</td>
                                         <td className="px-4 py-4 font-semibold" style={{ color: 'var(--text-main)' }}>#{pur.id?.slice(-6)}</td>
                                         <td className="px-4 py-4" style={{ color: 'var(--text-main)' }}>{pur.supplierName}</td>
                                         <td className="px-4 py-4" style={{ color: 'var(--text-secondary)' }}>{pur.invoiceNo || 'N/A'}</td>
                                         <td className="px-4 py-4" style={{ color: 'var(--text-secondary)' }}>{pur.items?.length} items</td>
-                                        <td className="px-4 py-4 text-right font-bold" style={{ color: 'var(--primary)' }}>{business.currency}{Number(pur.totalAmount).toFixed(2)}</td>
+                                        <td className="px-4 py-4 text-right font-bold" style={{ color: 'var(--primary)' }}>Rs.{Number(pur.totalAmount).toFixed(2)}</td>
                                         <td className="px-4 py-4 text-right">
                                             <div className="flex justify-end gap-2">
                                                 <button
@@ -713,7 +811,7 @@ const Purchases = ({ isStaff }) => {
                                         </td>
                                     </tr>
                                 ))}
-                                {purchases.length === 0 && (
+                                {filteredPurchases.length === 0 && (
                                     <tr>
                                         <td colSpan="7" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-muted)' }}>No purchase history found</td>
                                     </tr>
@@ -780,9 +878,10 @@ const Purchases = ({ isStaff }) => {
                                         onChange={e => setNewProductModal({ ...newProductModal, category: e.target.value })}
                                     >
                                         <option value="General">General</option>
-                                        <option value="Other">Other</option>
-                                        <option value="Category">Category</option>
-                                        <option value="Bio">Bio</option>
+                                        <option value="Grocery">Grocery</option>
+                                        <option value="Electronics">Electronics</option>
+                                        <option value="Clothing">Clothing</option>
+                                        <option value="Services">Services</option>
                                         <option value="Other">Other</option>
                                     </select>
                                 </div>
@@ -794,11 +893,12 @@ const Purchases = ({ isStaff }) => {
                                         value={newProductModal.unit}
                                         onChange={e => setNewProductModal({ ...newProductModal, unit: e.target.value })}
                                     >
-                                        <option value="Bag">Bag</option>
-                                        <option value="Bottle">Bottle</option>
-                                        <option value="Packet">Packet</option>
+                                        <option value="Piece">Piece</option>
+                                        <option value="Box">Box</option>
+                                        <option value="Pack">Pack</option>
                                         <option value="Kg">Kg</option>
                                         <option value="Ltr">Ltr</option>
+                                        <option value="Hour">Hour</option>
                                     </select>
                                 </div>
                             </div>

@@ -4,10 +4,20 @@ import { firestoreService } from '../services/firestoreService'
 import { motion } from 'framer-motion'
 import { showError, showSuccess, showConfirm } from '../utils/alert'
 import { generateCustomerLedgerPDF } from '../utils/pdfGenerator'
-import { useBusiness } from '../context/BusinessContext'
+
+const normalizeCustomerName = value => (value || '').trim().toLowerCase()
+const normalizeCustomerPhone = value => (value || '').replace(/\D/g, '')
+const customerKey = customer => customer.id || `${normalizeCustomerName(customer.name)}|${normalizeCustomerPhone(customer.phone)}`
+
+const recordBelongsToCustomer = (record, customer) => {
+    const samePhone = normalizeCustomerPhone(record.customerPhone || record.phone) &&
+        normalizeCustomerPhone(record.customerPhone || record.phone) === normalizeCustomerPhone(customer.phone)
+    const sameName = normalizeCustomerName(record.customerName || record.name) &&
+        normalizeCustomerName(record.customerName || record.name) === normalizeCustomerName(customer.name)
+    return Boolean(samePhone || sameName)
+}
 
 const Customers = ({ isStaff: propIsStaff }) => {
-    const business = useBusiness()
     const [customers, setCustomers] = useState([])
     const [invoices, setInvoices] = useState([])
     const [payments, setPayments] = useState([])
@@ -101,8 +111,13 @@ const Customers = ({ isStaff: propIsStaff }) => {
 
     const handleDeleteCustomer = async (id) => {
         if (await showConfirm("Delete this customer?", "History will remain in invoices.")) {
-            await firestoreService.deleteCustomer(id)
-            setSelectedCustomer(null)
+            try {
+                await firestoreService.deleteCustomer(id)
+                setSelectedCustomer(null)
+                showSuccess("Customer deleted successfully.")
+            } catch (err) {
+                showError("Unable to delete customer: " + err.message)
+            }
         }
     }
 
@@ -223,7 +238,7 @@ const Customers = ({ isStaff: propIsStaff }) => {
         // 4. Calculate Period Totals
         const periodSales = txnsInPeriod.reduce((sum, t) => sum + t.amount, 0)
         const periodReceived = txnsInPeriod.reduce((sum, t) => sum + t.paidAmount, 0)
-        const periodClosingBalance = openingBalance + periodSales - periodReceived
+        const periodClosingBalance = openingBalance - periodSales + periodReceived
 
         const periodTotals = {
             sales: periodSales,
@@ -238,39 +253,50 @@ const Customers = ({ isStaff: propIsStaff }) => {
 
     // --- Data Processing ---
 
-    // Compute per-customer due balance for the list view
+    // Compute per-customer signed balance for the list view. Match by either
+    // phone or normalized name so a missing/changed phone cannot hide a credit.
     const customerDueMap = useMemo(() => {
         const map = {}
-        // 1. Sum credit invoices per customer
-        invoices.forEach(inv => {
-            const isCredit = (inv.paymentMode || '').toLowerCase() === 'credit'
-            const key = inv.customerPhone || (inv.customerName || '').trim().toLowerCase()
-            if (!map[key]) map[key] = { due: 0, name: inv.customerName }
-            if (isCredit) map[key].due += Number(inv.totalAmount) || 0
-        })
-        // 2. Subtract payments received
-        payments.forEach(p => {
-            if (p.type === 'EXPENSE' || p.mode === 'Manual Charge') return
-            const key = p.customerPhone || (p.customerName || '').trim().toLowerCase()
-            if (!map[key]) map[key] = { due: 0 }
-            map[key].due -= Number(p.amount) || 0
-        })
-        // 3. Subtract sale returns (goods returned = due reduces)
-        saleReturns.forEach(r => {
-            const key = r.customerPhone || (r.customerName || '').trim().toLowerCase()
-            if (!map[key]) map[key] = { due: 0 }
-            map[key].due -= Number(r.totalRefund) || 0
+        customers.forEach(customer => {
+            let balance = 0
+
+            invoices.forEach(inv => {
+                if (recordBelongsToCustomer(inv, customer) && (inv.paymentMode || '').toLowerCase() === 'credit') {
+                    balance -= Number(inv.totalAmount) || 0
+                }
+            })
+
+            payments.forEach(payment => {
+                if (recordBelongsToCustomer(payment, customer) && payment.type !== 'EXPENSE' && payment.mode !== 'Manual Charge') {
+                    balance += Number(payment.amount) || 0
+                }
+            })
+
+            saleReturns.forEach(returnRecord => {
+                if (recordBelongsToCustomer(returnRecord, customer)) {
+                    balance += Number(returnRecord.totalRefund) || 0
+                }
+            })
+
+            map[customerKey(customer)] = balance
         })
         return map
-    }, [invoices, payments, saleReturns])
+    }, [customers, invoices, payments, saleReturns])
 
     const getCustomerDue = (customer) => {
-        const key = customer.phone || (customer.name || '').trim().toLowerCase()
-        return Math.max(0, customerDueMap[key]?.due || 0)
+        return customerDueMap[customerKey(customer)] || 0
     }
 
+    const formatBalance = value => {
+        const amount = Number(value) || 0
+        const formatted = Math.abs(amount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+        return amount < 0 ? `-Rs.${formatted}` : `Rs.${formatted}`
+    }
+
+    const balanceColor = value => value < 0 ? 'var(--danger)' : value > 0 ? 'var(--success)' : 'var(--text-main)'
+
     const handleExportDuesCSV = () => {
-        const rows = [['Customer Name', 'Phone', 'Address', `Outstanding Due (${business.currency})`]]
+        const rows = [['Customer Name', 'Phone', 'Address', 'Outstanding Due (Rs.)']]
         const sorted = [...customers].sort((a, b) => getCustomerDue(b) - getCustomerDue(a))
         sorted.forEach(c => {
             rows.push([c.name, c.phone || '', c.address || '', getCustomerDue(c).toFixed(2)])
@@ -310,7 +336,7 @@ const Customers = ({ isStaff: propIsStaff }) => {
 
         custInvoices.forEach(inv => {
             const amount = Number(inv.totalAmount) || 0
-            const isCredit = inv.paymentMode === 'Credit'
+            const isCredit = (inv.paymentMode || '').toLowerCase() === 'credit'
 
             // Unified Transaction Object
             allTrans.push({
@@ -387,8 +413,8 @@ const Customers = ({ isStaff: propIsStaff }) => {
         // 4. Calculate Running Balance
         let balance = 0
         const transactionsWithBalance = allTrans.map(t => {
-            // Balance = Previous + Debit (Sale) - Credit (Paid)
-            balance = balance + t.amount - t.paidAmount
+            // Credit sale is a negative customer balance; receipts move it up.
+            balance = balance - t.amount + t.paidAmount
             return { ...t, balance }
         })
 
@@ -421,21 +447,25 @@ const Customers = ({ isStaff: propIsStaff }) => {
                 <div className="flex justify-between items-center p-4 rounded-xl shadow-sm border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                     <div>
                         <h2 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
-                            <User style={{ color: 'var(--primary)' }} /> {business.getTerm('customers')}
+                            <User style={{ color: 'var(--primary)' }} /> Customers
                         </h2>
-                        <p className="text-[10px] font-bold text-muted mt-0.5">
-                            Total Due: <span className="text-red-500">{business.currency}{customers.reduce((acc, c) => acc + getCustomerDue(c), 0).toLocaleString('en-IN')}</span>
-                        </p>
+                        {!isStaff && (
+                            <p className="text-[10px] font-bold text-muted mt-0.5">
+                                Total Balance: <span style={{ color: balanceColor(customers.reduce((acc, c) => acc + getCustomerDue(c), 0)) }}>{formatBalance(customers.reduce((acc, c) => acc + getCustomerDue(c), 0))}</span>
+                            </p>
+                        )}
                     </div>
                     <div className="flex items-center gap-2">
-                        <button
-                            onClick={handleExportDuesCSV}
-                            title="Export All Dues as CSV"
-                            className="p-2 rounded-lg border transition-colors"
-                            style={{ background: 'var(--background)', color: 'var(--text-muted)', borderColor: 'var(--border)' }}
-                        >
-                            <FileDown size={18} />
-                        </button>
+                        {!isStaff && (
+                            <button
+                                onClick={handleExportDuesCSV}
+                                title="Export All Dues as CSV"
+                                className="p-2 rounded-lg border transition-colors"
+                                style={{ background: 'var(--background)', color: 'var(--text-muted)', borderColor: 'var(--border)' }}
+                            >
+                                <FileDown size={18} />
+                            </button>
+                        )}
                         <button
                             onClick={() => { resetCustomerForm(); setIsEditModalOpen(true); }}
                             className="p-2 rounded-lg transition-colors shadow-lg"
@@ -488,18 +518,20 @@ const Customers = ({ isStaff: propIsStaff }) => {
                                         </div>
                                     </div>
                                 </div>
-                                {/* Due Badge */}
-                                {(() => {
-                                    const due = getCustomerDue(customer)
-                                    return due > 0 ? (
-                                        <div className="text-right shrink-0 ml-2">
-                                            <div className="text-[9px] font-black uppercase tracking-widest text-red-400">Due</div>
-                                            <div className="text-sm font-black text-red-500">{business.currency}{due.toLocaleString('en-IN')}</div>
-                                        </div>
-                                    ) : (
-                                        <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 shrink-0 ml-2">✓ Paid</span>
-                                    )
-                                })()}
+                                {!isStaff && (
+                                    /* Due and paid status are private to administrators. */
+                                    (() => {
+                                        const due = getCustomerDue(customer)
+                                        return due !== 0 ? (
+                                            <div className="text-right shrink-0 ml-2">
+                                                <div className="text-[9px] font-black uppercase tracking-widest" style={{ color: balanceColor(due) }}>Balance</div>
+                                                <div className="text-sm font-black" style={{ color: balanceColor(due) }}>{formatBalance(due)}</div>
+                                            </div>
+                                        ) : (
+                                            <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 shrink-0 ml-2">✓ Paid</span>
+                                        )
+                                    })()
+                                )}
                             </div>
                         </div>
                     ))}
@@ -509,11 +541,11 @@ const Customers = ({ isStaff: propIsStaff }) => {
                 </div>
             </div>
             {/* Right Panel: Ledger & Details */}
-            <div className={`flex-[2] rounded-2xl shadow-sm border flex flex-col overflow-hidden ${selectedCustomer ? 'fixed inset-0 z-[100] m-0 rounded-none h-full w-full' : 'hidden lg:flex items-center justify-center'}`}
+            <div className={`customer-ledger-panel flex-[2] rounded-2xl shadow-sm border flex flex-col overflow-hidden ${selectedCustomer ? 'fixed inset-0 z-[100] m-0 rounded-none h-full w-full' : 'hidden lg:flex items-center justify-center'}`}
                 style={{ background: selectedCustomer ? 'var(--background)' : 'var(--surface)', borderColor: 'var(--border)' }}>
                 {selectedCustomer ? (
                     <>
-                        <div className="p-6 border-b" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
+                        <div className="customer-ledger-header p-6 border-b" style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}>
                             <div className="flex flex-col md:flex-row justify-between items-start gap-4 mb-6">
                                 <div className="w-full md:w-auto">
                                     <button onClick={() => setSelectedCustomer(null)} className="mb-4 flex items-center gap-1 text-sm font-bold px-3 py-1.5 rounded-lg border shadow-sm"
@@ -573,22 +605,22 @@ const Customers = ({ isStaff: propIsStaff }) => {
                                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                                     <div className="card" style={{ position: 'relative', overflow: 'hidden', padding: isMobile ? '16px' : '24px', background: 'var(--surface)', border: '1px solid var(--border)' }}>
                                         <div style={{ color: 'var(--text-muted)', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Purchase</div>
-                                        <div style={{ fontSize: isMobile ? '18px' : '24px', fontWeight: 800, color: 'var(--danger)' }}>{business.currency}{totals.sales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        <div style={{ fontSize: isMobile ? '18px' : '24px', fontWeight: 800, color: 'var(--danger)' }}>Rs.{totals.sales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                                         <Package size={40} style={{ position: 'absolute', right: '-10px', bottom: '-10px', opacity: 0.1, color: 'var(--danger)' }} />
                                     </div>                        <div className="p-4 rounded-xl border shadow-sm" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
                                         <div className="text-xs font-bold uppercase tracking-widest mb-1" style={{ color: 'var(--success)' }}>Received</div>
-                                        <div className="text-xl font-black" style={{ color: 'var(--success)' }}>{business.currency}{totals.received.toLocaleString()}</div>
+                                        <div className="text-xl font-black" style={{ color: 'var(--success)' }}>Rs.{totals.received.toLocaleString()}</div>
                                     </div>
-                                    <div className={`p-4 rounded-xl border shadow-sm ${totals.due > 0 ? '' : ''}`}
-                                        style={{ background: totals.due > 0 ? 'rgba(239, 68, 68, 0.1)' : 'var(--surface)', borderColor: totals.due > 0 ? 'var(--danger)' : 'var(--border)' }}>
-                                        <div className={`text-xs font-bold uppercase tracking-widest mb-1 ${totals.due > 0 ? '' : ''}`} style={{ color: totals.due > 0 ? 'var(--danger)' : 'var(--text-muted)' }}>Net Due</div>
-                                        <div className={`text-xl font-black ${totals.due > 0 ? '' : ''}`} style={{ color: totals.due > 0 ? 'var(--danger)' : 'var(--text-main)' }}>{business.currency}{totals.due.toLocaleString()}</div>
+                                    <div className="p-4 rounded-xl border shadow-sm"
+                                        style={{ background: totals.due < 0 ? 'rgba(239, 68, 68, 0.1)' : 'var(--surface)', borderColor: totals.due < 0 ? 'var(--danger)' : 'var(--border)' }}>
+                                        <div className="text-xs font-bold uppercase tracking-widest mb-1" style={{ color: balanceColor(totals.due) }}>Net Balance</div>
+                                        <div className="text-xl font-black" style={{ color: balanceColor(totals.due) }}>{formatBalance(totals.due)}</div>
                                     </div>
                                 </div>
                             )}
                         </div>
 
-                        <div className="flex-1 overflow-x-auto" style={{ background: 'var(--surface)' }}>
+                        <div className="customer-ledger-table flex-1 min-h-0 overflow-x-auto" style={{ background: 'var(--surface)' }}>
                             {!isStaff ? (
                                 <table className="min-w-full text-sm">
                                     <thead className="sticky top-0 z-10" style={{ background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
@@ -621,21 +653,20 @@ const Customers = ({ isStaff: propIsStaff }) => {
 
                                                     {/* Mobile Only: Show Received & Balance inline if table cells hidden */}
                                                     <div className="mt-1 flex flex-col gap-1 sm:hidden text-xs">
-                                                        {t.paidAmount > 0 && <span className="font-bold" style={{ color: 'var(--success)' }}>Recv: {business.currency}{t.paidAmount.toLocaleString()}</span>}
-                                                        <span style={{ color: 'var(--text-secondary)' }}>Bal: {business.currency}{t.balance.toLocaleString()} {t.balance > 0 ? 'Dr' : 'Cr'}</span>
+                                                        {t.paidAmount > 0 && <span className="font-bold" style={{ color: 'var(--success)' }}>Recv: Rs.{t.paidAmount.toLocaleString()}</span>}
+                                                        <span style={{ color: balanceColor(t.balance) }}>Bal: {formatBalance(t.balance)} {t.balance > 0 ? 'Dr' : t.balance < 0 ? 'Cr' : ''}</span>
                                                     </div>
-                                                    </td>
-                                                    <td className="px-4 md:px-6 py-4 text-right font-bold whitespace-nowrap text-xs md:text-sm" style={{ color: 'var(--warning)', background: 'rgba(245, 158, 11, 0.1)' }}>
-                                                    {t.amount > 0 ? `${business.currency}${t.amount.toLocaleString()}` : '-'}
-                                                    </td>
-                                                    <td className="px-4 md:px-6 py-4 text-right font-bold whitespace-nowrap hidden sm:table-cell text-xs md:text-sm" style={{ color: 'var(--success)', background: 'rgba(16, 185, 129, 0.1)' }}>
-                                                    {t.paidAmount > 0 ? `${business.currency}${t.paidAmount.toLocaleString()}` : '-'}
-                                                    </td>
-                                                    <td className="px-4 md:px-6 py-4 text-right font-black whitespace-nowrap hidden md:table-cell text-xs md:text-sm" style={{ color: 'var(--text-main)' }}>
-                                                    {business.currency}{t.balance.toLocaleString()}
-
+                                                </td>
+                                                <td className="px-4 md:px-6 py-4 text-right font-bold whitespace-nowrap text-xs md:text-sm" style={{ color: 'var(--warning)', background: 'rgba(245, 158, 11, 0.1)' }}>
+                                                    {t.amount > 0 ? `Rs.${t.amount.toLocaleString()}` : '-'}
+                                                </td>
+                                                <td className="px-4 md:px-6 py-4 text-right font-bold whitespace-nowrap hidden sm:table-cell text-xs md:text-sm" style={{ color: 'var(--success)', background: 'rgba(16, 185, 129, 0.1)' }}>
+                                                    {t.paidAmount > 0 ? `Rs.${t.paidAmount.toLocaleString()}` : '-'}
+                                                </td>
+                                                <td className="px-4 md:px-6 py-4 text-right font-black whitespace-nowrap hidden md:table-cell text-xs md:text-sm" style={{ color: balanceColor(t.balance) }}>
+                                                    {formatBalance(t.balance)}
                                                     <span className="text-[10px] ml-1 font-normal" style={{ color: 'var(--text-muted)' }}>
-                                                        {t.balance > 0 ? 'Dr' : 'Cr'}
+                                                        {t.balance > 0 ? 'Dr' : t.balance < 0 ? 'Cr' : ''}
                                                     </span>
                                                 </td>
                                                 <td className="px-4 md:px-6 py-4 text-right flex justify-end gap-2">
@@ -740,7 +771,7 @@ const Customers = ({ isStaff: propIsStaff }) => {
                         </div>
                         <form onSubmit={handlePaymentSave} className="p-6 space-y-4">
                             <div>
-                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount Received ({business.currency})</label>
+                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount Received (Rs.)</label>
                                 <input
                                     className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-green-500/20 transition-all font-black text-xl"
                                     placeholder="0.00"
@@ -805,7 +836,7 @@ const Customers = ({ isStaff: propIsStaff }) => {
                         </div>
                         <form onSubmit={handleSaveExpense} className="p-6 space-y-4">
                             <div>
-                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount ({business.currency})</label>
+                                <label className="block text-xs font-bold uppercase mb-1" style={{ color: 'var(--text-muted)' }}>Amount (Rs.)</label>
                                 <input
                                     className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-red-500/20 transition-all font-black text-xl"
                                     placeholder="0.00"

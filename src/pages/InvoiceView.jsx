@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { firestoreService } from '../services/firestoreService';
 import { Printer, Download, ArrowLeft } from 'lucide-react';
-import { useBusiness } from '../context/BusinessContext';
 import { generateInvoicePDF, generateThermalInvoicePDF } from '../utils/pdfGenerator';
+import { getCachedStoreName } from '../config/storeConfig';
+import { getInvoiceTemplateSettings } from '../config/invoiceTemplateConfig';
 
 const InvoiceView = () => {
-    const business = useBusiness();
+    const templateSettings = getInvoiceTemplateSettings();
+    const storeName = templateSettings.sellerName || getCachedStoreName();
+    const thermalPrinterEnabled = templateSettings.thermalPrinterEnabled === true;
     const [invoice, setInvoice] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -34,7 +37,21 @@ const InvoiceView = () => {
                 const found = await firestoreService.getInvoice(invoiceId);
 
                 if (found) {
-                    setInvoice(found);
+                    // Older invoices may not have copied customer contact
+                    // details. Rehydrate them from the current customer record.
+                    const customers = await firestoreService.getCustomers().catch(() => [])
+                    const invoiceName = (found.customerName || '').trim().toLowerCase()
+                    const invoicePhone = (found.customerPhone || '').replace(/\D/g, '')
+                    const customer = customers.find(record => {
+                        const phone = (record.phone || '').replace(/\D/g, '')
+                        const name = (record.name || '').trim().toLowerCase()
+                        return (invoicePhone && phone && invoicePhone === phone) || (invoiceName && name && invoiceName === name)
+                    })
+                    setInvoice({
+                        ...found,
+                        customerPhone: customer?.phone || found.customerPhone || '',
+                        customerAddress: customer?.address || found.customerAddress || ''
+                    });
                 } else {
                     setError("Invoice not found.");
                 }
@@ -83,9 +100,11 @@ const InvoiceView = () => {
                     </button>
                     <h1 className="font-bold text-lg">Invoice Receipt</h1>
                     <div className="flex gap-2">
-                        <button onClick={() => generateThermalInvoicePDF(invoice)} className="hover:bg-white/10 p-2 rounded-full transition-colors" title="Thermal Print">
-                            <Printer size={20} />
-                        </button>
+                        {thermalPrinterEnabled && (
+                            <button onClick={() => generateThermalInvoicePDF(invoice)} className="hover:bg-white/10 p-2 rounded-full transition-colors" title="Thermal Print">
+                                <Printer size={20} />
+                            </button>
+                        )}
                         <button onClick={() => generateInvoicePDF(invoice)} className="hover:bg-white/10 p-2 rounded-full transition-colors" title="A4 PDF">
                             <Download size={20} />
                         </button>
@@ -95,12 +114,12 @@ const InvoiceView = () => {
                 {/* Thermal-like View */}
                 <div className="p-6 text-center text-gray-900 font-mono text-sm leading-relaxed" style={{ fontFamily: '"Courier New", Courier, monospace' }}>
 
-                    <div className="font-bold text-xl mb-1 text-primary-dark">{business.appName.toUpperCase()}</div>
+                    <div className="font-bold text-xl mb-4 text-primary-dark">{storeName}</div>
 
-
-                    <p className="text-xs text-gray-500 mb-1">{business.storeType}</p>
-                    <p className="text-xs text-gray-500 mb-1">{business.address}</p>
-                    <p className="text-xs text-gray-500 mb-4">Ph: {business.contact}</p>
+                    <p className="text-xs text-gray-500 mb-1">{templateSettings.sellerTagline}</p>
+                    <p className="text-xs text-gray-500 mb-1">{templateSettings.sellerAddress}</p>
+                    <p className="text-xs text-gray-500 mb-1">Ph: {templateSettings.sellerPhone}</p>
+                    {templateSettings.sellerGstin && <p className="text-xs text-gray-500 mb-4">GSTIN: {templateSettings.sellerGstin}</p>}
 
                     <div className="border-b border-dashed border-gray-300 my-4"></div>
 
@@ -117,6 +136,7 @@ const InvoiceView = () => {
                         <p className="text-xs text-gray-500 mb-1">Billed To:</p>
                         <p className="font-bold text-sm uppercase">{invoice.customerName || 'Walk-in Customer'}</p>
                         {invoice.customerPhone && <p className="text-xs text-gray-600 mt-1">Ph: {invoice.customerPhone}</p>}
+                        {invoice.customerAddress && <p className="text-xs text-gray-600 mt-1">Address: {invoice.customerAddress}</p>}
                     </div>
 
                     <div className="border-b border-gray-900 border-[1.5px] mb-2"></div>
@@ -155,7 +175,7 @@ const InvoiceView = () => {
                         )}
                         <div className="flex justify-between font-bold text-lg mt-2 pt-2 border-t border-dashed border-gray-300">
                             <span>Grand Total</span>
-                            <span>{business.currency} {invoice.totalAmount.toFixed(2)}</span>
+                            <span>Rs {invoice.totalAmount.toFixed(2)}</span>
                         </div>
                     </div>
 
@@ -168,7 +188,7 @@ const InvoiceView = () => {
 
                 {/* Branding Footer */}
                 <div className="bg-gray-50 p-3 text-center text-[10px] text-gray-400 no-print">
-                    Powered by {business.appName} App
+                    Powered by {storeName} App
                 </div>
             </div>
         </div>

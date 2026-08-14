@@ -17,10 +17,9 @@ import {
 import { firestoreService } from '../services/firestoreService'
 import { jsPDF } from 'jspdf'
 import autoTable from 'jspdf-autotable'
-import { useBusiness } from '../context/BusinessContext'
+import { getCachedStoreName } from '../config/storeConfig'
 
 const Cumulative = () => {
-    const business = useBusiness()
     const [invoices, setInvoices] = useState([])
     const [purchases, setPurchases] = useState([])
     const [products, setProducts] = useState([])
@@ -130,7 +129,7 @@ const Cumulative = () => {
         // Header
         doc.setFontSize(22)
         doc.setTextColor(16, 116, 73) // Emerald Primary
-        doc.text(business.appName.toUpperCase(), 105, 15, { align: 'center' })
+        doc.text(getCachedStoreName(), 105, 15, { align: 'center' })
         
         doc.setFontSize(14)
         doc.setTextColor(100)
@@ -204,14 +203,14 @@ const Cumulative = () => {
                     className={`flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeView === 'sales' ? 'bg-primary text-white shadow-md' : 'text-muted hover:text-primary'}`}
                 >
                     <TrendingUp size={16} />
-                    Cumulative {business.getTerm('orders')}
+                    Cumulative Sales
                 </button>
                 <button
                     onClick={() => setActiveView('purchase')}
                     className={`flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-bold transition-all ${activeView === 'purchase' ? 'bg-primary text-white shadow-md' : 'text-muted hover:text-primary'}`}
                 >
                     <ShoppingCart size={16} />
-                    Cumulative Purchases
+                    Cumulative Purchase
                 </button>
             </div>
 
@@ -273,7 +272,7 @@ const Cumulative = () => {
                         <span className="text-[10px] font-bold text-muted uppercase tracking-wider">Total {activeView === 'sales' ? 'Bills' : 'Entries'}</span>
                     </div>
                     <div className="text-base md:text-2xl font-black" style={{ color: 'var(--text-main)' }}>
-                        {stats.count} {activeView === 'sales' ? business.getTerm('orders') : 'Records'}
+                        {stats.count} {activeView === 'sales' ? 'Bills' : 'Records'}
                     </div>
                 </div>
 
