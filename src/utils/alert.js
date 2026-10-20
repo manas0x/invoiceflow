@@ -1,15 +1,18 @@
 import Swal from 'sweetalert2'
 
+const primaryColor = '#2d6a4f'
+const dangerColor = '#ef4444'
+
 export const showAlert = (title, icon = 'info') => {
     return Swal.fire({
         title,
         icon,
-        confirmButtonColor: '#2563eb', // Blue-600
-        background: '#ffffff',
-        color: '#0f172a', // Slate-900
+        confirmButtonColor: 'var(--primary)',
+        background: 'var(--surface)',
+        color: 'var(--text-main)',
         customClass: {
-            popup: 'rounded-2xl border border-gray-100 shadow-2xl',
-            confirmButton: 'px-6 py-2.5 rounded-xl font-bold bg-blue-600 hover:bg-blue-700 text-white transition-colors'
+            popup: 'rounded-2xl border border-border shadow-2xl',
+            confirmButton: 'px-6 py-2.5 rounded-xl font-bold btn-primary text-white'
         }
     })
 }
@@ -23,14 +26,14 @@ export const showConfirm = async (title, text = "You won't be able to revert thi
         text,
         icon: 'warning',
         showCancelButton: true,
-        confirmButtonColor: '#2563eb',
-        cancelButtonColor: '#ef4444',
-        background: '#ffffff',
-        color: '#0f172a',
+        confirmButtonColor: 'var(--primary)',
+        cancelButtonColor: 'var(--danger, #ef4444)',
+        background: 'var(--surface)',
+        color: 'var(--text-main)',
         confirmButtonText: 'Yes, proceed',
         customClass: {
-            popup: 'rounded-2xl border border-gray-100 shadow-2xl',
-            confirmButton: 'px-6 py-2.5 rounded-xl font-bold bg-blue-600 hover:bg-blue-700 text-white transition-colors',
+            popup: 'rounded-2xl border border-border shadow-2xl',
+            confirmButton: 'px-6 py-2.5 rounded-xl font-bold btn-primary text-white',
             cancelButton: 'px-6 py-2.5 rounded-xl font-bold hover:bg-red-600 transition-colors'
         }
     })
@@ -44,12 +47,6 @@ export const showToast = (title, icon = 'success') => {
         showConfirmButton: false,
         timer: 3000,
         timerProgressBar: true,
-        background: '#1e293b', // Slate-800
-        color: '#ffffff',
-        iconColor: icon === 'success' ? '#3b82f6' : '#ef4444', // Blue or Red
-        customClass: {
-            popup: 'rounded-xl shadow-xl'
-        },
         didOpen: (toast) => {
             toast.addEventListener('mouseenter', Swal.stopTimer)
             toast.addEventListener('mouseleave', Swal.resumeTimer)

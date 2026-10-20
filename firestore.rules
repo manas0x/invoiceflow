@@ -1,66 +1,181 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function
-    function isAuthenticated() {
+    // Authorization is enforced here, not by React visibility or localStorage.
+    // Roles come from the single UID-bound profile document.
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    // Users Collection: Used for Role mgmt
+    function isAdmin() {
+      return isSignedIn() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'dev_admin'])
+      );
+    }
+
+    function isAppUser() {
+      return isAdmin() || (
+        isSignedIn() && (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['staff', 'user'])
+        )
+      );
+    }
+
+    function isStaff() {
+      return isAppUser() && !isAdmin();
+    }
+
+    function isStaffMember() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'staff';
+    }
+
+    // User profiles contain identity and role metadata only. Passwords must
+    // never be stored in this collection.
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      // Keep the user's own profile lookup independent from the admin helper,
+      // because isAdmin() reads this same UID-bound document.
+      allow get: if isSignedIn() && userId == request.auth.uid;
+      allow get: if isAdmin();
+      // A user may query only the one profile whose canonical authUid is
+      // their own UID. Admins may list profiles for user management.
+      allow list: if isAdmin() || (
+        isSignedIn() && resource.data.authUid == request.auth.uid
+      );
+
+      // The client can create staff/user profiles only while authenticated as
+      // an admin, and can never create a new admin role from the browser.
+      allow create: if isAdmin() && request.resource.data.role in ['staff', 'user'];
+      allow update: if isAdmin() && (
+        (resource.data.role == 'admin' && request.resource.data.role == 'admin') ||
+        (resource.data.role == 'dev_admin' && request.resource.data.role == 'dev_admin') ||
+        (resource.data.role in ['staff', 'user'] && request.resource.data.role in ['staff', 'user'])
+      );
+      allow delete: if isAdmin() && resource.data.role in ['staff', 'user'];
     }
 
-    // Invoices: PUBLIC READ (for sharing), Auth Write
+    // Business data is private to app users.
     match /invoices/{invoiceId} {
-      allow read: if true;
-      allow write: if isAuthenticated();
-    }
-    
-    // Core Business Authenticated Data
-    match /products/{productId} {
-      allow read: if true;           // Public: online shop needs this
-      allow write: if isAuthenticated();
-    }
-    match /customers/{customerId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /suppliers/{supplierId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /purchases/{purchaseId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /metadata/{docId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /customer_payments/{paymentId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /supplier_payments/{paymentId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /notifications/{notificationId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /settings/{document=**} {
-      allow read, write: if true;
-    }
-    match /sale_returns/{returnId} {
-      allow read, write: if isAuthenticated();
-    }
-    match /purchase_returns/{returnId} {
-      allow read, write: if isAuthenticated();
-    }
-    // Online Shop — customers can place orders publicly, only admin can read
-    match /shop_orders/{orderId} {
-      allow create: if true;
-      allow read, update, delete: if isAuthenticated();
+      allow read: if isAppUser();
+      allow create: if isAppUser();
+      allow update: if isAdmin();
+      // Staff invoice deletion also restores the sold stock in the same
+      // transaction; the product rule limits that restoration to stock fields.
+      allow delete: if isAdmin() || isStaffMember();
     }
 
-    // Default Lock on anything else
+    match /products/{productId} {
+      allow read: if isAppUser();
+      allow create, delete: if isAdmin();
+      // Staff billing may adjust stock batches, but cannot alter price, GST,
+      // product name, or other inventory master data.
+      allow update: if isAdmin() || (
+        isStaff() && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['stock', 'batches', 'updatedAt'])
+      );
+    }
+
+    match /customers/{customerId} {
+      allow read: if isAppUser();
+      allow create: if isAppUser();
+      allow update: if isAdmin() || (
+        isStaff() && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'phone', 'address', 'lastVisit', 'updatedAt'])
+      );
+      allow delete: if isAdmin() || isStaffMember();
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isAppUser();
+      allow write: if isAdmin();
+    }
+
+    match /purchases/{purchaseId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /metadata/{docId} {
+      allow read: if isAppUser();
+      // A staff member's first bill may create the counter document. The
+      // previous rule used resource.data.diff(...), which only works for an
+      // existing document and therefore denied that first transaction.
+      allow create: if isAdmin() || (
+        isStaff() && request.resource.data.keys().hasOnly(['invoiceCount', 'lastUpdated'])
+      );
+      allow update: if isAdmin() || (
+        isStaff() && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['invoiceCount', 'lastUpdated'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /customer_payments/{paymentId} {
+      allow read: if isAppUser();
+      allow create, update: if isAppUser();
+      allow delete: if isAdmin();
+    }
+
+    match /supplier_payments/{paymentId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAdmin();
+      allow create: if isAppUser();
+      allow update, delete: if isAdmin();
+    }
+
+    // Only the public shop switch is readable without login. All other
+    // settings (including email/backup configuration) are admin-only.
+    match /settings/public_shop {
+      allow get: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Invoice rendering configuration is readable by signed-in app users,
+    // while only administrators may change it.
+    match /settings/invoice_template {
+      allow get: if isAppUser();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Website CSS theme is readable by all app users but editable by admins.
+    match /settings/app_preferences {
+      allow get: if isAppUser();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /settings/{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    match /sale_returns/{returnId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /purchase_returns/{returnId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Public customers may submit an order, but cannot read, modify, or
+    // delete any order. Keep this schema deliberately small.
+    match /shop_orders/{orderId} {
+      allow create: if request.resource.data.keys().hasOnly([
+        'customerName', 'customerPhone', 'customerAddress', 'items',
+        'totalAmount', 'notes', 'createdAt', 'status'
+      ])
+      && request.resource.data.customerName is string
+      && request.resource.data.customerName.size() > 0
+      && request.resource.data.customerName.size() <= 120
+      && request.resource.data.items is list
+      && request.resource.data.items.size() > 0
+      && request.resource.data.items.size() <= 100;
+      allow read, update, delete: if isAdmin();
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }
