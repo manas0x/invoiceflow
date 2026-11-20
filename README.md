@@ -1,6 +1,6 @@
-# Mahaveer Khad Bhandar - Billing System
+# InvoiceFlow - Billing System
 
-A modern, fast, and keyboard-first billing application built for **Mahaveer Khad Bhandar**.
+A modern, fast, and keyboard-first billing application built with **InvoiceFlow**.
 Designed for speed, reliability, and offline-first capabilities using React & Firebase.
 
 ## 🚀 Key Features
@@ -27,7 +27,7 @@ Designed for speed, reliability, and offline-first capabilities using React & Fi
 
 ### 🛠 Technical Highlights
 - **Framework**: React + Vite (Blazing fast performance).
-- **Database**: Firebase Firestore (Real-time syncing).
+- **Database**: Firebase Firestore, PostgreSQL, MySQL/MariaDB, or SQLite through the setup connector.
 - **Styling**: TailwindCSS (Modern UI).
 - **Offline Support**: PWA capabilities (works with spotty internet).
 
@@ -35,8 +35,8 @@ Designed for speed, reliability, and offline-first capabilities using React & Fi
 
 1.  **Clone the Repository**
     ```bash
-    git clone https://github.com/your-repo/mahaveer-billing.git
-    cd mahaveer-billing
+    git clone https://github.com/your-repo/invoiceflow.git
+    cd invoiceflow
     ```
 
 2.  **Install Dependencies**
@@ -57,6 +57,16 @@ Designed for speed, reliability, and offline-first capabilities using React & Fi
     ```bash
     npm run dev
     ```
+    This starts both the Vite app and the local SQL connector on port `8787`. The first page is the InvoiceFlow installer.
+
+    For a client-only session without the connector:
+    ```bash
+    npm run dev:client
+    ```
+
+    SQL setup requests use `/api/setup/test-connection` and `/api/setup/import`; Vite proxies those paths to the connector server.
+
+    After setup, InvoiceFlow downloads a clean deployment ZIP containing `dist`, the connector server, package manifests, `.env`, and the completed installation lock. It excludes source files, test files, editor settings, logs, and `node_modules`. On another server, extract it, run `npm install --omit=dev`, then start it with `node server/index.js`.
 
 ## ⌨️ Keyboard Shortcuts Cheatsheet
 
@@ -69,4 +79,4 @@ Designed for speed, reliability, and offline-first capabilities using React & Fi
 | **Ctrl + Space** | Global Search |
 
 ---
-*Built with ❤️ for Mahaveer Khad Bhandar*
+*Built with ❤️ for InvoiceFlow*

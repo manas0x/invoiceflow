@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+server/.invoiceflow-setup.json
+server/data/
+*.sqlite
 
 # Editor directories and files
 .vscode/*
@@ -21,4 +24,9 @@ dist-ssr
 *.ntvs*
 *.njsproj
 *.sln
-*.sw?.env
+*.sw?
+
+# Local test copy, environment and installer/runtime artifacts
+/test/
+/tmp/
+.env
